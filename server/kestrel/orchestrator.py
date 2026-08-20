@@ -85,9 +85,25 @@ class Orchestrator:
             task_id=task.id,
         )
         executor = self._executors.get(task.executor)
+        if executor is None:
+            # Not a stall - a system fault. Reporting it as "parked after 0
+            # nudges" would blame the agent for something Kestrel is missing,
+            # and the fix is entirely different.
+            await self._park(
+                task,
+                executor=None,
+                now=now,
+                attention=attention,
+                report=report,
+                reason=f"no {task.executor} executor registered",
+                body=f"{task.handle} needs a {task.executor} executor and none is registered, "
+                f"so it cannot be supervised. Parked.",
+            )
+            return
+
         action = next_action(task.nudges)
 
-        if action in (Action.NUDGE, Action.NUDGE_HARDER) and executor is not None:
+        if action in (Action.NUDGE, Action.NUDGE_HARDER):
             # The detector's evidence is the message. Specific beats polite:
             # "you have run gh run watch 40 times" moves it, "please continue"
             # does not.
@@ -99,23 +115,43 @@ class Orchestrator:
             report.nudged.append(task.handle)
             return
 
-        if action is Action.RESTART and executor is not None:
+        if action is Action.RESTART:
             await executor.stop(task, reason=str(verdict.reason))
             await executor.start(task, brief=task.goal)
             self._tasks.record_nudge(task.id, f"restart after {verdict.reason}")
             report.restarted.append(task.handle)
             return
 
-        # Park and move on. Reclaiming the night matters more than asking
-        # permission, so this is not urgent - the system already handled it by
-        # continuing with something else.
-        self._tasks.transition(task.id, TaskState.PARKED, reason=str(verdict.reason))
+        await self._park(
+            task,
+            executor=executor,
+            now=now,
+            attention=attention,
+            report=report,
+            reason=str(verdict.reason),
+            body=f"{task.handle} stalled: {verdict.evidence} Parked after "
+            f"{task.nudges} nudges and moved on.",
+        )
+
+    async def _park(
+        self,
+        task: Task,
+        executor: Executor | None,
+        now: datetime,
+        attention: AttentionState,
+        report: TickReport,
+        reason: str,
+        body: str,
+    ) -> None:
+        """Park and move on. Reclaiming the night matters more than asking
+        permission, so this is never urgent - the system already handled it by
+        continuing with something else."""
+        self._tasks.transition(task.id, TaskState.PARKED, reason=reason)
         if executor is not None:
             await executor.stop(task, reason="parked")
         self._deliveries.send(
             subject=f"{task.handle} parked",
-            body=f"{task.handle} stalled: {verdict.evidence} Parked after "
-            f"{task.nudges} nudges and moved on.",
+            body=body,
             urgency=Urgency.NORMAL,
             state=attention,
             task_id=task.id,

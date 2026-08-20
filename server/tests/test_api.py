@@ -121,10 +121,13 @@ def test_the_polling_loop_is_caught_through_the_hook_path(client):
 
     report = client.post("/tick").json()
     assert report["quiet"] is False
-    assert report["parked"] == ["KES-31"]  # no executor registered, so it parks
+    assert report["parked"] == ["KES-31"]
 
+    # No executor is registered in this app, and the message must say *that*
+    # rather than blaming the agent for a stall Kestrel could not act on.
     delivered = client.get("/deliveries").json()
-    assert "gh run watch" in delivered[0]["body"]
+    assert "needs a claude_code executor and none is registered" in delivered[0]["body"]
+    assert "stalled" not in delivered[0]["body"]
 
 
 def test_illegal_transitions_are_refused_with_a_reason(client):

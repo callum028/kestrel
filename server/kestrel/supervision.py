@@ -63,6 +63,13 @@ class StallVerdict:
         return self.stalled
 
 
+def minutes(delta: timedelta) -> str:
+    """Evidence gets read aloud and pasted into a session. "1 minutes" reads as
+    carelessness, and carelessness in the evidence undermines the correction."""
+    count = int(delta.total_seconds() // 60)
+    return f"{count} minute" if count == 1 else f"{count} minutes"
+
+
 def _repeated_call(events: list[Event]) -> tuple[str, int] | None:
     calls = [
         f"{e.payload.get('tool', '?')} {e.payload.get('args', '')}".strip()
@@ -91,8 +98,8 @@ def detect(
         return StallVerdict(
             True,
             StallReason.WALL_CLOCK,
-            f"this task has been running {int(elapsed.total_seconds() // 60)} minutes, "
-            f"past its {int(budget.wall_clock.total_seconds() // 60)} minute budget",
+            f"this task has been running {minutes(elapsed)}, "
+            f"past its {minutes(budget.wall_clock)} budget",
         )
 
     turns = sum(1 for e in events if e.kind is EventKind.TOOL_CALL)
@@ -104,11 +111,10 @@ def detect(
     repeated = _repeated_call(events)
     if repeated is not None:
         call, count = repeated
-        window = _window_minutes(events, now)
         return StallVerdict(
             True,
             StallReason.REPETITION,
-            f"you've run `{call}` {count} times in {window} minutes with no change - "
+            f"you've run `{call}` {count} times in {_window(events, now)} with no change - "
             f"it isn't going to report back. Stop waiting and continue with the task.",
         )
 
@@ -118,18 +124,18 @@ def detect(
         return StallVerdict(
             True,
             StallReason.NO_PROGRESS,
-            f"nothing in the worktree has changed for {int(idle.total_seconds() // 60)} minutes. "
+            f"nothing in the worktree has changed for {minutes(idle)}. "
             f"If you're waiting on something, say what. Otherwise continue.",
         )
 
     return StallVerdict(False, StallReason.NONE)
 
 
-def _window_minutes(events: list[Event], now: datetime) -> int:
+def _window(events: list[Event], now: datetime) -> str:
     calls = [e for e in events if e.kind is EventKind.TOOL_CALL]
     if not calls:
-        return 0
-    return max(1, int((now - calls[0].ts).total_seconds() // 60))
+        return "no time at all"
+    return minutes(max(now - calls[0].ts, timedelta(minutes=1)))
 
 
 def next_action(nudges_sent: int) -> Action:
