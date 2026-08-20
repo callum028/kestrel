@@ -26,6 +26,10 @@ class EventKind(StrEnum):
     TASK_ANSWERED = "task.answered"
     TASK_CLOSED = "task.closed"
 
+    # Session activity. Note this is activity, not progress - the distinction is
+    # the whole point of the stall detector.
+    TOOL_CALL = "session.tool_call"
+
     # Supervision
     STALL_DETECTED = "supervision.stall_detected"
     NUDGE_SENT = "supervision.nudge_sent"
