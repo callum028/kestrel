@@ -83,6 +83,15 @@ CREATE TABLE IF NOT EXISTS dev_lock_queue (
     queued_at TEXT NOT NULL
 );
 INSERT OR IGNORE INTO dev_lock (id, task_id, acquired_at) VALUES (1, NULL, NULL);
+
+-- Claude Code hooks identify themselves by session, not by task. The executor
+-- registers the mapping when it starts a session; without it a hook is still
+-- recorded, just unattributed - never dropped.
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id TEXT PRIMARY KEY,
+    task_id    TEXT NOT NULL,
+    started_at TEXT NOT NULL
+);
 """
 
 

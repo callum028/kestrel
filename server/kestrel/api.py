@@ -1,0 +1,296 @@
+"""HTTP surface.
+
+Three kinds of caller, and they want different things:
+
+- **Claude Code hooks** push what a session is doing. This is what makes the
+  stall detector real rather than synthetic: PreToolUse gives activity, Stop
+  gives a claim of completion, Notification gives a question.
+- **Clients** (desktop, phone) report attention signals and read state. They
+  hold no history of their own - there is one conversation and it lives here.
+- **Callum**, indirectly, acknowledging deliveries and driving tasks.
+
+Every endpoint returns a state. Nothing returns an empty 200 that could mean
+either success or a silent miss.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from typing import Any
+
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
+
+from .attention import Focus, Signals
+from .config import Config
+from .events import EventKind
+from .observations import ObservationState
+from .runtime import Runtime
+from .tasks import IllegalTransition, TaskState
+
+
+class SignalsIn(BaseModel):
+    app_focused: bool = False
+    app_open: bool = False
+    last_input_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+    phone_on_tailnet: bool = False
+    voice_session_open: bool = False
+    calendar_busy: bool = False
+    on_call: bool = False
+    audio_route: str | None = None
+    task_handle: str | None = None
+    pane: str | None = None
+    selection: str | None = None
+    stated_away_until: datetime | None = None
+
+    def to_signals(self, now: datetime) -> Signals:
+        return Signals(
+            now=now,
+            app_focused=self.app_focused,
+            app_open=self.app_open,
+            last_input_at=self.last_input_at,
+            heartbeat_at=self.heartbeat_at or now,
+            phone_on_tailnet=self.phone_on_tailnet,
+            voice_session_open=self.voice_session_open,
+            calendar_busy=self.calendar_busy,
+            on_call=self.on_call,
+            audio_route=self.audio_route,
+            focus=Focus(self.task_handle, self.pane, self.selection),
+            stated_away_until=self.stated_away_until,
+        )
+
+
+class HookIn(BaseModel):
+    """Claude Code hook payload. Field names follow the hook contract; extras are
+    tolerated because the shape is not ours to control."""
+
+    hook_event_name: str
+    session_id: str | None = None
+    tool_name: str | None = None
+    tool_input: dict[str, Any] | None = None
+    message: str | None = None
+
+    model_config = {"extra": "allow"}
+
+
+class TaskIn(BaseModel):
+    handle: str
+    goal: str
+    criteria: list[str] = Field(default_factory=list)
+    executor: str = "claude_code"
+    scope: str | None = None
+    ticket_ref: str | None = None
+
+
+class BindIn(BaseModel):
+    session_id: str
+    task_handle: str
+
+
+class AckIn(BaseModel):
+    on: str
+
+
+def _tool_signature(hook: HookIn) -> str:
+    """Compact and stable, so identical calls collapse in the repetition counter
+    while genuinely different work does not."""
+    if not hook.tool_input:
+        return ""
+    for key in ("command", "file_path", "path", "pattern", "url"):
+        if key in hook.tool_input:
+            return str(hook.tool_input[key])[:120]
+    return ""
+
+
+def create_app(config: Config | None = None, runtime: Runtime | None = None) -> FastAPI:
+    rt = runtime or Runtime.build(config or Config.from_env())
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        ticker = asyncio.create_task(rt.run())
+        try:
+            yield
+        finally:
+            ticker.cancel()
+
+    app = FastAPI(title="Kestrel", lifespan=lifespan)
+    app.state.runtime = rt
+
+    @app.get("/health")
+    def health() -> dict[str, Any]:
+        return {
+            "ok": True,
+            "active_tasks": len(rt.tasks.active()),
+            "dev_lock": rt.dev_lock.holder().task_id if rt.dev_lock.holder() else None,
+            "pending_deliveries": len(rt.deliveries.pending()),
+        }
+
+    @app.get("/state")
+    def state() -> dict[str, Any]:
+        now = datetime.now(UTC)
+        attention = rt.attention(now)
+        return {
+            "block": rt.state_block(now),
+            "presence": attention.presence,
+            "focus": attention.focus.describe(),
+            "speech_suppressed": attention.speech_suppressed,
+        }
+
+    @app.post("/clients/signals")
+    def signals(body: SignalsIn) -> dict[str, Any]:
+        state = rt.report_signals(body.to_signals(datetime.now(UTC)))
+        return {"presence": state.presence, "speech_suppressed": state.speech_suppressed}
+
+    @app.post("/hooks/claude")
+    def claude_hook(hook: HookIn) -> dict[str, Any]:
+        task_id = rt.task_for_session(hook.session_id) if hook.session_id else None
+        if task_id is None:
+            # Recorded anyway. An unattributed hook is a gap in supervision, not
+            # something to drop on the floor.
+            rt.log.append(
+                EventKind.HOOK_UNATTRIBUTED,
+                "claude",
+                {"event": hook.hook_event_name, "session_id": hook.session_id},
+            )
+            return {"status": "not_found", "searched_for": hook.session_id or "(no session_id)"}
+
+        event = hook.hook_event_name
+        if event in ("PreToolUse", "PostToolUse"):
+            rt.log.append(
+                EventKind.TOOL_CALL,
+                "claude",
+                {"tool": hook.tool_name or "?", "args": _tool_signature(hook)},
+                task_id=task_id,
+            )
+        elif event == "Notification":
+            rt.log.append(
+                EventKind.TASK_QUESTION, "claude", {"message": hook.message}, task_id=task_id
+            )
+        elif event in ("Stop", "SubagentStop"):
+            # A claim, not a fact. Validation decides.
+            rt.log.append(EventKind.TASK_CLOSED, "claude", {"claimed": "done"}, task_id=task_id)
+        return {"status": "ok", "task_id": task_id, "event": event}
+
+    @app.post("/sessions/bind")
+    def bind(body: BindIn) -> dict[str, Any]:
+        task = rt.tasks.by_handle(body.task_handle)
+        if task is None:
+            return {"status": "not_found", "searched_for": body.task_handle, "looked_in": "tasks"}
+        rt.bind_session(body.session_id, task.id)
+        rt.log.append(
+            EventKind.SESSION_BOUND, "agent", {"session_id": body.session_id}, task_id=task.id
+        )
+        return {"status": "ok", "task_id": task.id}
+
+    @app.get("/tasks")
+    def list_tasks() -> list[dict[str, Any]]:
+        return [
+            {
+                "handle": t.handle,
+                "goal": t.goal,
+                "state": t.state,
+                "executor": t.executor,
+                "nudges": t.nudges,
+                "criteria": t.criteria,
+            }
+            for t in rt.tasks.active()
+        ]
+
+    @app.post("/tasks")
+    def create_task(body: TaskIn) -> dict[str, Any]:
+        if rt.tasks.by_handle(body.handle) is not None:
+            return {"status": "refused", "reason": f"{body.handle} already exists"}
+        task = rt.tasks.create(
+            handle=body.handle,
+            goal=body.goal,
+            criteria=body.criteria,
+            executor=body.executor,
+            scope=body.scope,
+            ticket_ref=body.ticket_ref,
+        )
+        return {"status": "ok", "id": task.id, "handle": task.handle, "state": task.state}
+
+    @app.post("/tasks/{handle}/state/{to}")
+    def transition(handle: str, to: TaskState) -> dict[str, Any]:
+        task = rt.tasks.by_handle(handle)
+        if task is None:
+            return {"status": "not_found", "searched_for": handle, "looked_in": "tasks"}
+        try:
+            updated = rt.tasks.transition(task.id, to)
+        except IllegalTransition as exc:
+            return {"status": "refused", "reason": str(exc)}
+        return {"status": "ok", "state": updated.state}
+
+    @app.get("/events")
+    def events(since: int = 0, limit: int = 200) -> list[dict[str, Any]]:
+        return [
+            {
+                "seq": e.seq,
+                "ts": e.ts.isoformat(),
+                "kind": e.kind,
+                "actor": e.actor,
+                "task_id": e.task_id,
+                "payload": e.payload,
+            }
+            for e in rt.log.since(since, limit)
+        ]
+
+    @app.get("/deliveries")
+    def deliveries() -> list[dict[str, Any]]:
+        return [
+            {
+                "id": d.id,
+                "subject": d.subject,
+                "body": d.body,
+                "channel": d.channel,
+                "urgency": d.urgency,
+                "escalations": d.escalations,
+            }
+            for d in rt.deliveries.pending()
+        ]
+
+    @app.post("/deliveries/{delivery_id}/ack")
+    def ack(delivery_id: str, body: AckIn) -> dict[str, Any]:
+        try:
+            rt.deliveries.get(delivery_id)
+        except KeyError:
+            return {"status": "not_found", "searched_for": delivery_id, "looked_in": "deliveries"}
+        # Acknowledging anywhere clears it everywhere - the Pi owns the state.
+        rt.deliveries.acknowledge(delivery_id, on=body.on)
+        return {"status": "ok"}
+
+    @app.get("/observations")
+    def observations() -> list[dict[str, Any]]:
+        return [
+            {"id": o.id, "what": o.what, "location": o.location, "why": o.why}
+            for o in rt.observations.open()
+        ]
+
+    @app.post("/observations/{obs_id}/{state}")
+    def resolve_observation(obs_id: str, state: ObservationState) -> dict[str, Any]:
+        rt.observations.resolve(obs_id, state)
+        return {"status": "ok", "state": state}
+
+    @app.post("/tick")
+    async def tick() -> dict[str, Any]:
+        report = await rt.tick_once()
+        return {
+            "quiet": report.quiet,
+            "nudged": report.nudged,
+            "restarted": report.restarted,
+            "parked": report.parked,
+            "escalated": report.escalated,
+            "stuck_deploy": report.stuck_deploy,
+        }
+
+    @app.get("/memory")
+    def memory(project: str | None = None) -> dict[str, Any]:
+        return {
+            "core": rt.memory.core(project),
+            "count": len(rt.memory.all()),
+        }
+
+    return app

@@ -52,6 +52,12 @@ class EventKind(StrEnum):
     MESSAGE_DELIVERED = "channel.delivered"
     MESSAGE_ACKNOWLEDGED = "channel.acknowledged"
 
+    # System. A failing tick is recorded rather than swallowed - an assistant
+    # that dies quietly is worse than one that reports a bad pass.
+    TICK_FAILED = "system.tick_failed"
+    SESSION_BOUND = "system.session_bound"
+    HOOK_UNATTRIBUTED = "system.hook_unattributed"
+
 
 @dataclass(frozen=True)
 class Event:
