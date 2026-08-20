@@ -300,11 +300,19 @@ Rules, roughly as they appear:
 6. **Landing.** A PR opens. **Merge is authorised on green CI** — there is no localhost, so merging
    and deploying to dev is how the work becomes testable at all. Merge is therefore part of the test
    loop, not the end of it, and is not treated as a *what* decision.
-7. **Validation.** Runs against the deployed dev environment, after merge, outside the session.
-   Acceptance criteria captured as executable checks wherever possible — a command, an expected exit
-   code, a string to match. Green CI is necessary but never sufficient; it gates the merge, it does
-   not mean the work is done. Non-executable criteria escalate to Callum; that is a legitimate
-   escalation, not a gap.
+7. **Validation.** Playwright against the deployed dev environment, after merge. Green CI is
+   necessary but never sufficient; it gates the merge, it does not mean the work is done.
+   Non-executable criteria escalate to Callum; that is a legitimate escalation, not a gap.
+
+   Claude runs Playwright while working — that is how it iterates, and it should. But **Kestrel's own
+   run is the authoritative one**: same command, triggered by the agent outside the session, exit
+   code and report artefact read directly rather than taken from Claude's summary. It costs one
+   command and preserves the independence that makes validation worth anything.
+
+   The failure being guarded against is not a fabricated pass. It is the ordinary ones: the suite not
+   run, a subset run, a run that errored reported as green — and most commonly, **the test edited
+   until it passes instead of the code being fixed**. So the diff is checked for changes to spec
+   files, and any that the acceptance criteria did not call for are flagged.
 
    A failed validation on dev reopens the task with the evidence attached. It does not revert — dev
    is the testing ground, and a follow-up fix is the normal path.
