@@ -8,7 +8,7 @@ state rather than a string in a context block.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 DESK_IDLE_GRACE = timedelta(minutes=4)
@@ -92,9 +92,7 @@ class AttentionState:
 
 def compute(signals: Signals) -> AttentionState:
     now = signals.now
-    pc_awake = (
-        signals.heartbeat_at is not None and now - signals.heartbeat_at < HEARTBEAT_TIMEOUT
-    )
+    pc_awake = signals.heartbeat_at is not None and now - signals.heartbeat_at < HEARTBEAT_TIMEOUT
 
     stated_away = signals.stated_away_until is not None and now < signals.stated_away_until
     recent_input = (
@@ -120,7 +118,9 @@ def compute(signals: Signals) -> AttentionState:
     )
 
 
-def choose_channel(state: AttentionState, urgency: Urgency, focused_on: str | None = None) -> Channel:
+def choose_channel(
+    state: AttentionState, urgency: Urgency, focused_on: str | None = None
+) -> Channel:
     """Deterministic. Attention decides where it goes; urgency decides how loud.
 
     If a question concerns the task already on screen, it arrives inline - no

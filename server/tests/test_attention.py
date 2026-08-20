@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from kestrel.attention import (
     Channel,
@@ -11,7 +11,7 @@ from kestrel.attention import (
     escalate,
 )
 
-NOW = datetime(2026, 8, 20, 14, 38, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 20, 14, 38, tzinfo=UTC)
 
 
 def signals(**kw) -> Signals:

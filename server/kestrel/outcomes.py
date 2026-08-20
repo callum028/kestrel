@@ -7,7 +7,7 @@ failure that made v1 feel broken (a mis-heard contact name that simply gave up).
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -34,4 +34,4 @@ class Refused(BaseModel):
     reason: str
 
 
-Outcome = Annotated[Union[Ok, NotFound, Ambiguous, Refused], Field(discriminator="status")]
+Outcome = Annotated[Ok | NotFound | Ambiguous | Refused, Field(discriminator="status")]

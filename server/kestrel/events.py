@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Iterator
+from typing import Any
 
 
 class EventKind(StrEnum):
@@ -59,7 +60,7 @@ class Event:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _to_event(row: sqlite3.Row) -> Event:

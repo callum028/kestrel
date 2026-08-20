@@ -11,7 +11,7 @@ import json
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 
 from .events import EventKind, EventLog
@@ -63,15 +63,15 @@ class Task:
     state: TaskState
     scope: str | None = None
     ticket_ref: str | None = None
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     last_progress_at: datetime | None = None
     progress_hash: str | None = None
     nudges: int = 0
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _parse(ts: str | None) -> datetime | None:
@@ -158,7 +158,9 @@ class TaskStore:
         ).fetchall()
         return [_to_task(r) for r in rows]
 
-    def transition(self, task_id: str, to: TaskState, actor: str = "kestrel", **why: object) -> Task:
+    def transition(
+        self, task_id: str, to: TaskState, actor: str = "kestrel", **why: object
+    ) -> Task:
         task = self.get(task_id)
         if to not in LEGAL[task.state]:
             raise IllegalTransition(f"{task.handle}: {task.state} -> {to}")
