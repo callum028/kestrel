@@ -54,6 +54,35 @@ CREATE TABLE IF NOT EXISTS memory_usage (
     last_used_at TEXT NOT NULL,
     uses         INTEGER NOT NULL DEFAULT 1
 );
+
+-- One row per thing said to Callum. Escalation is on silence rather than a
+-- fan-out: duplicate notifications train you to ignore both.
+CREATE TABLE IF NOT EXISTS deliveries (
+    id          TEXT PRIMARY KEY,
+    subject     TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    urgency     TEXT NOT NULL,
+    channel     TEXT NOT NULL,
+    task_id     TEXT,
+    sent_at     TEXT NOT NULL,
+    acked_at    TEXT,
+    acked_on    TEXT,
+    escalations INTEGER NOT NULL DEFAULT 0
+);
+
+-- The dev environment is a shared singleton, so it is a lock rather than a
+-- step. Two tasks cannot validate at once; the second would be testing the
+-- first one's code.
+CREATE TABLE IF NOT EXISTS dev_lock (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    task_id     TEXT,
+    acquired_at TEXT
+);
+CREATE TABLE IF NOT EXISTS dev_lock_queue (
+    task_id   TEXT PRIMARY KEY,
+    queued_at TEXT NOT NULL
+);
+INSERT OR IGNORE INTO dev_lock (id, task_id, acquired_at) VALUES (1, NULL, NULL);
 """
 
 
