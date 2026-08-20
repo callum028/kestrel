@@ -45,6 +45,15 @@ CREATE TABLE IF NOT EXISTS observations (
     fingerprint TEXT NOT NULL UNIQUE,
     created_at  TEXT NOT NULL
 );
+
+-- Usage stats only. Durable memory itself lives as markdown in a git repo -
+-- this is the sidecar, so that reading a memory does not produce a commit.
+-- Used by the review surface, never as truth.
+CREATE TABLE IF NOT EXISTS memory_usage (
+    id           TEXT PRIMARY KEY,
+    last_used_at TEXT NOT NULL,
+    uses         INTEGER NOT NULL DEFAULT 1
+);
 """
 
 
