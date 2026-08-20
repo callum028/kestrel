@@ -34,8 +34,18 @@ Work progresses in his absence. Everything else is friction-shaving.
 
 These are load-bearing. Most design questions resolve by applying one of them.
 
-**Bounded autonomy.** Inside the scope given, it acts freely and proactively. To leave that scope, it
-asks. It may decide *how*; it may never decide *what*.
+**Bounded autonomy — attention is unbounded, action is bounded.** Inside the scope given, it acts
+freely and proactively. To leave that scope, it asks. It may decide *how*; it may never decide
+*what*.
+
+But staying in scope is a constraint on *acting*, not on *looking*. It should actively scan outside
+the brief for what has not been considered — adjacent bugs, dead code, a convention broken elsewhere,
+a missing test, a risk nobody named. Noticing is the job; acting on what it notices is a separate
+decision that belongs to Callum.
+
+The failure mode this guards against is the tempting one: fixing the small thing while you are
+already in there. A change that does more than its ticket is harder to review, harder to revert, and
+harder to reason about later. **Notice, record, propose — never quietly do.**
 
 **Every instruction ends in a state.** Done, queued with the condition that releases it, blocked with
 a reason, or a question. Silence is never an outcome. This applies at every layer — conversation,
@@ -340,6 +350,26 @@ one done and nine hours burned.
   cross-referencing the stated blocker against its own diff.
 - Grep the session's diff for `TODO`, `waiting on`, `blocked`, `disabled` markers it introduced, and
   surface them.
+
+### Observations
+
+The other half of supervision. While a task runs, Kestrel looks past the brief for what was not
+considered, and records what it finds as **observations** against the task — never as changes.
+
+Sources are the same material it already has: the session diff, the files touched and their
+neighbours, test coverage of the changed paths, conventions in the durable memory, the ticket's own
+history.
+
+An observation is a first-class record — what, where, why it matters, and which task surfaced it —
+and it has exactly three fates: promoted to a ticket (an ask), folded into the current task (an ask,
+and only if genuinely trivial), or dismissed. Dismissal is durable: the same observation is not
+raised twice unless the underlying facts change.
+
+They surface through the proactive channel, queued if outside the current mode window. They are never
+urgent — an observation has never earned a phone call.
+
+This is the mechanism behind wanting Kestrel to be strategic as well as operational. Without it,
+"proactive" degrades into reporting task status.
 
 ### Board and PR drift
 
