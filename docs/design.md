@@ -295,17 +295,39 @@ Rules, roughly as they appear:
 3. **Execution.** The agent creates a worktree on a task branch and starts a session. PTY plus hooks
    when watched; Agent SDK when unattended.
 4. **Supervision.** See §6.
-5. **Validation.** Black box, outside the session. Acceptance criteria captured as executable checks
-   wherever possible — a command, an expected exit code, a string to match. CI green is a standard
-   criterion. Non-executable criteria escalate to Callum; that is a legitimate escalation, not a gap.
-6. **Questions.** *How* answered from conventions and logged; *what* escalated per the channel
+5. **Questions.** *How* answered from conventions and logged; *what* escalated per the channel
    ladder. A parked task never blocks others.
-7. **Landing.** A PR opens. One lands at a time; anything still in flight rebases and revalidates.
-   Merging is a *what* decision and stays with Callum by default, grantable per task.
+6. **Landing.** A PR opens. **Merge is authorised on green CI** — there is no localhost, so merging
+   and deploying to dev is how the work becomes testable at all. Merge is therefore part of the test
+   loop, not the end of it, and is not treated as a *what* decision.
+7. **Validation.** Runs against the deployed dev environment, after merge, outside the session.
+   Acceptance criteria captured as executable checks wherever possible — a command, an expected exit
+   code, a string to match. Green CI is necessary but never sufficient; it gates the merge, it does
+   not mean the work is done. Non-executable criteria escalate to Callum; that is a legitimate
+   escalation, not a gap.
+
+   A failed validation on dev reopens the task with the evidence attached. It does not revert — dev
+   is the testing ground, and a follow-up fix is the normal path.
 8. **Closure.** Task record written: goal, criteria, decisions, diff, outcome. Notion updated by the
    lifecycle. Only genuinely durable learnings are promoted to memory. Transcript archived and
    searchable; never in context.
 9. **Report.** Next time Callum is present, briefly.
+
+### The dev environment is a singleton
+
+Validation runs against a shared deployed environment, which makes it a **lock**, not just a step.
+Two tasks cannot validate at once — the second would be testing the first one's code.
+
+Consequences:
+
+- Tasks run concurrently in isolated worktrees, but serialise at merge *and stay serialised through
+  deploy and validation*. The lock is held from merge until validation completes or fails.
+- A task waiting on the lock is not blocked and does not escalate. It queues.
+- Anything still in flight rebases and revalidates after each landing, because dev has moved.
+- A stuck deploy holds the lock. It needs its own timeout, and a held lock past that timeout is worth
+  reporting — it stalls every other task behind it.
+
+This is the real cap on useful concurrency, well before subscription rate limits.
 
 ---
 
@@ -367,9 +389,12 @@ is not raised twice unless the underlying facts change.
 
 #### Fixing in place
 
-Trivial fixes may be made without asking, because an unmerged PR is a review gate — the change is
-reversible and seen before it lands. This does not loosen bounded autonomy; it applies the same test
-(reversible, not externally visible) that the rest of the system uses.
+Trivial fixes may be made without asking. The justification is *not* PR review — PRs merge
+automatically on green CI, so a PR is not a reliable human gate. It rests on the bounds below being
+tight enough that nothing behavioural can reach dev, and on disclosure being loud enough that an
+unrequested change is never discovered by accident.
+
+That is a weaker gate than review, which is why the bounds are absolute rather than a judgement call.
 
 "Trivial" is defined by bounds, not judgement. **All** must hold:
 
