@@ -3,14 +3,14 @@ import pytest
 from kestrel.context import MEMORY_CORE_MAX, assemble
 from kestrel.models import Message
 
-BASE = dict(
-    identity="You are Kestrel.",
-    examples="> PC's off. Want me to queue it?",
-    memory_core=["Works at a startup", "Prefers integration tests for auth"],
-    attention_block="now: 2026-08-20T14:38:00\npresence: AT_DESK\nfocus: KES-31 / diff",
-    task_index=["KES-31 running 22m, 2 unanswered questions"],
-    conversation=[Message("user", "how's the auth one going?")],
-)
+BASE = {
+    "identity": "You are Kestrel.",
+    "examples": "> PC's off. Want me to queue it?",
+    "memory_core": ["Works at a startup", "Prefers integration tests for auth"],
+    "attention_block": "now: 2026-08-20T14:38:00\npresence: AT_DESK\nfocus: KES-31 / diff",
+    "task_index": ["KES-31 running 22m, 2 unanswered questions"],
+    "conversation": [Message("user", "how's the auth one going?")],
+}
 
 
 def test_assembly_is_deterministic():

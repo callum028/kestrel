@@ -15,7 +15,7 @@ NOW = datetime(2026, 8, 20, 14, 38, tzinfo=UTC)
 
 
 def signals(**kw) -> Signals:
-    base = dict(now=NOW, heartbeat_at=NOW - timedelta(seconds=5))
+    base = {"now": NOW, "heartbeat_at": NOW - timedelta(seconds=5)}
     base.update(kw)
     return Signals(**base)
 
