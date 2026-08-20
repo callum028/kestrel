@@ -361,9 +361,30 @@ neighbours, test coverage of the changed paths, conventions in the durable memor
 history.
 
 An observation is a first-class record — what, where, why it matters, and which task surfaced it —
-and it has exactly three fates: promoted to a ticket (an ask), folded into the current task (an ask,
-and only if genuinely trivial), or dismissed. Dismissal is durable: the same observation is not
-raised twice unless the underlying facts change.
+and it has exactly four fates: **fixed in place** (see below), promoted to a ticket (an ask), folded
+into the current task as real work (an ask), or dismissed. Dismissal is durable: the same observation
+is not raised twice unless the underlying facts change.
+
+#### Fixing in place
+
+Trivial fixes may be made without asking, because an unmerged PR is a review gate — the change is
+reversible and seen before it lands. This does not loosen bounded autonomy; it applies the same test
+(reversible, not externally visible) that the rest of the system uses.
+
+"Trivial" is defined by bounds, not judgement. **All** must hold:
+
+- Confined to files the task already touches
+- No behaviour change — typos, dead imports, stale comments, formatting, obviously wrong docstrings
+- Small enough to read at a glance
+- No new dependencies; no change to public API, config, schema, or test expectations
+- Validation still passes afterwards
+- At most three per task — three unrelated small fixes is scope creep however small each one is
+
+Anything failing any bound is an observation, and observations ask.
+
+Disclosure is mandatory and goes three places: a line in the PR description, a comment on the Notion
+ticket, and the next report. The PR is the one that matters — it is where the change is actually
+reviewable.
 
 They surface through the proactive channel, queued if outside the current mode window. They are never
 urgent — an observation has never earned a phone call.
