@@ -106,9 +106,16 @@ fn main() {
         None => ("", "none"),
     };
 
-    // Runs before any page script, so the app never has to poll for it.
+    // The page is served from tauri://localhost, which has no API on it, so a
+    // relative fetch goes nowhere at all. Tell it where the server actually is.
+    // Overridable, because the server moves to the Pi later.
+    let api = std::env::var("KESTREL_API").unwrap_or_else(|_| "http://localhost:8099".into());
+
+    // Runs before any page script, so the app never has to poll for any of it.
     let script = format!(
-        "window.__KESTREL_TOKEN__ = {}; window.__KESTREL_TOKEN_SOURCE__ = {};",
+        "window.__KESTREL_API__ = {}; window.__KESTREL_TOKEN__ = {}; \
+         window.__KESTREL_TOKEN_SOURCE__ = {};",
+        json_string(&api),
         json_string(token),
         json_string(source),
     );

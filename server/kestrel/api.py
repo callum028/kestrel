@@ -22,11 +22,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .attention import Focus, Signals
-from .auth import check_request, check_websocket, load_or_create_token
+from .auth import ALLOWED_ORIGINS, check_request, check_websocket, load_or_create_token
 from .config import Config
 from .events import EventKind
 from .observations import ObservationState
@@ -136,6 +137,13 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
     async def require_token(request: Request, call_next):  # type: ignore[no-untyped-def]
         # Everything is behind this. There is no unauthenticated read-only
         # surface, because "what am I working on" is not public either.
+        #
+        # Preflights are exempt: a CORS preflight carries no Authorization
+        # header by definition, so rejecting it would block the desktop app
+        # before it ever got to authenticate. CORSMiddleware answers those,
+        # and only for origins on the allowlist.
+        if request.method == "OPTIONS":
+            return await call_next(request)
         try:
             check_request(request, token)
         except HTTPException as exc:
@@ -143,6 +151,19 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
                 {"status": "refused", "reason": exc.detail}, status_code=exc.status_code
             )
         return await call_next(request)
+
+    # Added last, so it sits outermost and handles preflights before auth runs.
+    # The desktop app is served from tauri://localhost and talks to the API on
+    # another origin, which makes every call cross-origin.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=sorted(ALLOWED_ORIGINS),
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["authorization", "content-type"],
+        # No cookies anywhere in this system, deliberately: the token is a
+        # header precisely so a browser cannot attach it automatically.
+        allow_credentials=False,
+    )
 
     @app.get("/health")
     def health() -> dict[str, Any]:

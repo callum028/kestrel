@@ -39,9 +39,20 @@ export interface State {
   speech_suppressed: boolean;
 }
 
-// In dev the Vite proxy makes the API same-origin. In a Tauri build the page is
-// served from tauri://localhost, so it has to be addressed directly.
-const BASE = import.meta.env.VITE_API_BASE ?? "";
+// Where the API is depends on how the page was loaded:
+//
+// - Vite dev: same origin, because the dev server proxies. BASE stays empty.
+// - Tauri: the page comes from tauri://localhost, an origin with no API on it.
+//   Relative URLs silently go nowhere, which is exactly what happened the first
+//   time this was built. The shell injects the real address instead.
+//
+// Injected rather than baked in at build time so the server can move to the Pi
+// without rebuilding the app. (CSP connect-src has to allow the host too.)
+const FALLBACK_API = "http://localhost:8099";
+const BASE =
+  window.__KESTREL_API__ ??
+  import.meta.env.VITE_API_BASE ??
+  (location.protocol.startsWith("http") ? "" : FALLBACK_API);
 
 // The token is a header, never a cookie: browsers attach cookies to cross-site
 // requests automatically, which is exactly the hole this is closing. Tauri
@@ -49,6 +60,8 @@ const BASE = import.meta.env.VITE_API_BASE ?? "";
 // the bundle; the dev server passes it through the environment instead.
 declare global {
   interface Window {
+    /** Injected by the desktop shell: where the Kestrel server actually is. */
+    __KESTREL_API__?: string;
     __KESTREL_TOKEN__?: string;
     /** Where the desktop shell found the token, or "none". A release build has
      *  no console, so this is the only way a missing token can be explained. */
