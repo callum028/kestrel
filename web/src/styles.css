@@ -1,0 +1,389 @@
+/* Restraint over decoration: this gets stared at all day, so it has to be
+   legible at 2am rather than impressive in a screenshot. One accent, used for
+   state and never for ornament. Typography and spacing carry the rest. */
+
+:root {
+  --bg: #0d0f12;
+  --panel: #14171c;
+  --panel-raised: #191d24;
+  --border: #232830;
+  --border-bright: #2f3641;
+  --text: #d8dee9;
+  --text-dim: #98a1b3;
+  --text-faint: #6b7486;
+  --accent: #6ea8fe;
+  --warn: #e0a355;
+  --bad: #e06c75;
+  --good: #7cc98f;
+
+  --mono: "JetBrains Mono", "Cascadia Code", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+/* --- shell ------------------------------------------------------------- */
+
+.app {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100%;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 12px;
+  height: 38px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-right: 12px;
+  color: var(--text);
+}
+
+.tab {
+  padding: 4px 10px;
+  border-radius: 5px;
+  color: var(--text-dim);
+}
+
+.tab:hover {
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+.tab[aria-selected="true"] {
+  background: var(--panel-raised);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--border-bright);
+}
+
+.tab:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.tab:disabled:hover {
+  background: none;
+  color: var(--text-faint);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.presence {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.dot.at_desk {
+  background: var(--good);
+}
+.dot.nearby {
+  background: var(--warn);
+}
+.dot.away {
+  background: var(--text-faint);
+}
+
+/* --- work layout ------------------------------------------------------- */
+
+.work {
+  display: grid;
+  grid-template-columns: 232px 1fr 320px;
+  min-height: 0;
+}
+
+.rail {
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.rail.right {
+  border-right: none;
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+.rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px 6px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.rail-head button {
+  color: var(--text-dim);
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 4px;
+}
+
+.rail-head button:hover {
+  color: var(--accent);
+}
+
+.empty {
+  padding: 6px 12px 12px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 12px;
+  border-left: 2px solid transparent;
+}
+
+.item:hover {
+  background: var(--panel-raised);
+}
+
+.item[aria-selected="true"] {
+  background: var(--panel-raised);
+  border-left-color: var(--accent);
+}
+
+.item .handle {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.item .sub {
+  color: var(--text-faint);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.state {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--border);
+  color: var(--text-dim);
+}
+
+.state.running {
+  color: var(--good);
+}
+.state.parked,
+.state.needs_input {
+  color: var(--warn);
+}
+.state.failed {
+  color: var(--bad);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* --- terminals --------------------------------------------------------- */
+
+.center {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-width: 0;
+  min-height: 0;
+}
+
+.termbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 5px 8px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.termtab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.termtab:hover {
+  background: var(--panel-raised);
+}
+
+.termtab[aria-selected="true"] {
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+.termtab .close {
+  color: var(--text-faint);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.termtab .close:hover {
+  color: var(--bad);
+}
+
+.termtab.dead {
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+
+.terminal-host {
+  position: relative;
+  min-height: 0;
+  padding: 6px 0 0 8px;
+  background: var(--bg);
+}
+
+.terminal-host > div {
+  height: 100%;
+}
+
+.placeholder {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: var(--text-faint);
+  font-size: 12px;
+  text-align: center;
+  padding: 24px;
+}
+
+/* --- conversation ------------------------------------------------------ */
+
+.feed {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 4px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.said {
+  border-left: 2px solid var(--border-bright);
+  padding: 2px 0 2px 10px;
+}
+
+.said .subject {
+  font-size: 11px;
+  color: var(--text-faint);
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.said .body {
+  margin-top: 2px;
+}
+
+.said.blocking {
+  border-left-color: var(--bad);
+}
+
+.said.observation {
+  border-left-color: var(--text-faint);
+}
+
+.ack {
+  margin-top: 4px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.ack:hover {
+  color: var(--accent);
+}
+
+.composer {
+  border-top: 1px solid var(--border);
+  padding: 10px 12px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.composer input {
+  width: 100%;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 6px 8px;
+  color: var(--text);
+  font: inherit;
+}
+
+.composer input:disabled {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+.composer .note {
+  margin-top: 6px;
+  line-height: 1.4;
+}
