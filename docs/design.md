@@ -461,6 +461,20 @@ the phone can attach to the same session, Kestrel injects relayed answers into t
 session, not a parallel channel), and recording comes free. Input arbitration needs a write lock so
 Kestrel cannot inject mid-keystroke.
 
+**The terminal is first-class, not a session viewer.** Callum uses VS Code almost solely for its
+terminal, so Kestrel's has to be good enough to replace it or he will keep both open and Kestrel
+becomes the second window. That means the agent hosts *N* PTYs rather than one per task:
+
+- **task terminals**, bound to a task and its worktree, which Kestrel can also write into
+- **free terminals**, just a shell in a project directory, which Kestrel never touches
+
+Both are the same primitive. The difference is only whether a task owns it. Tabs, scrollback,
+colours, resize, copy/paste and a remembered working directory are all requirements, not polish —
+a terminal that is 90% as good as the one he has is a terminal he will not use.
+
+File editing stays outside: the diff pane covers review, and an editor covers the rest. GitHub and
+Notion panes are worth having and are explicitly v2.
+
 **The session never waits.** Get up for coffee, Claude asks a question, it routes to the phone,
 answer in a sentence, work continues. Callum stops being the bottleneck for a session at his own
 desk.
@@ -618,6 +632,7 @@ From v1, with reasons.
 | Wake-on-LAN | Removed | The PC is on or off deliberately |
 | Screen vision / observation layer | Structured focus object | Exact, cheap, no vision model |
 | Personality as a subsystem | Identity layer, injected everywhere | Consistency requires it on every call, including cheap ones |
+| `kestrel.service` on the Pi | Replaced outright by the new service | v1 and v2 both binding :8099 would look like a working deploy and silently bind nothing |
 
 ---
 
