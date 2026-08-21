@@ -1,0 +1,21 @@
+[package]
+name = "kestrel-desktop"
+version = "0.1.0"
+description = "Kestrel"
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[features]
+# Used by `tauri dev`; nothing custom here yet.
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

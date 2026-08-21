@@ -12,6 +12,10 @@ class Config:
     memory_repo: Path
     identity_dir: Path
 
+    @property
+    def token_path(self) -> Path:
+        return self.data_dir / "token"
+
     @classmethod
     def from_env(cls) -> Config:
         root = Path(os.environ.get("KESTREL_DATA", str(Path.home() / ".kestrel")))

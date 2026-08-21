@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 
+from .db import Database
 from .events import EventKind, EventLog
 
 
@@ -99,7 +100,7 @@ def _to_task(row: sqlite3.Row) -> Task:
 class TaskStore:
     """Projection over the event log. Every mutation appends an event first."""
 
-    def __init__(self, conn: sqlite3.Connection, log: EventLog) -> None:
+    def __init__(self, conn: Database, log: EventLog) -> None:
         self._conn = conn
         self._log = log
 

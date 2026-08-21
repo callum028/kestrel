@@ -602,6 +602,42 @@ reports itself.
 
 ---
 
+## 11a. Security
+
+`POST /terminals` spawns a process in Callum's account, with his SSH keys, his GitHub token and his
+repos. That is the feature, not a bug — which makes **"who can reach the API" the entire security
+model**, and makes this more sensitive than a personal project usually is.
+
+**Two threats, and the second is the one that gets underestimated.**
+
+*Anything on the network.* Bind to loopback in dev; never `--host`. A dev server bound to `0.0.0.0`
+proxying to this API is remote code execution for anyone on the LAN.
+
+*Any web page he has open.* A browser will happily let a random site issue requests to
+`http://localhost:8099`. **Loopback is not a security boundary for a browser** — this is how a series
+of local dev tools have been compromised.
+
+**Controls:**
+
+- A token on every request, as a header. **Never a cookie**: browsers attach cookies to cross-site
+  requests automatically, which is precisely the hole. Generated once, stored `0600` in the data
+  directory.
+- An `Origin` allowlist. A non-browser caller sends no Origin; a browser always does, so an
+  unrecognised one is a page rather than a client. This is what stops a site that somehow learned the
+  token from using it from a tab.
+- WebSockets take the token as a query parameter, because the browser WebSocket API cannot set
+  headers. Middleware does not run for websockets, so the endpoint checks it itself — and that is the
+  endpoint carrying keystrokes.
+- The desktop app reads the token off disk at startup and injects it before page scripts run, so it
+  is never baked into a bundle and rotating it does not mean rebuilding.
+
+**Once the server is on the Pi**, Tailscale becomes the perimeter — device auth, WireGuard, and ACLs
+restricting which devices reach the port. Worth being clear-eyed: this means *the phone can run code
+on the PC*, so a lost phone is a real compromise and the token still matters.
+
+**Tailscale Funnel is the sharpest edge.** It is the public internet. Expose only `/hooks/github`,
+verify GitHub's HMAC signature on it, and never the rest of the app.
+
 ## 12. Spikes
 
 Throwaway, timeboxed, ordered by what they would invalidate. The first two require a physical device

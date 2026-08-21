@@ -17,9 +17,17 @@ def client(tmp_path):
         identity_dir=tmp_path / "identity",
     )
     rt = Runtime.build(config)
-    with TestClient(create_app(runtime=rt)) as c:
+    app = create_app(runtime=rt)
+    with TestClient(app, headers={"Authorization": f"Bearer {app.state.token}"}) as c:
+        c.token = app.state.token  # type: ignore[attr-defined]
         yield c
     rt.terminals.close_all()
+
+
+def ws_url(client, terminal_id: str) -> str:
+    """The browser WebSocket API cannot set headers, so the token rides in the
+    query string - the one place it does."""
+    return f"/terminals/{terminal_id}/ws?token={client.token}"
 
 
 def read_until(ws, needle: str, limit: int = 60) -> str:
@@ -54,7 +62,7 @@ def test_a_free_terminal_echoes_what_it_is_sent(client, tmp_path):
     ).json()
     assert opened["status"] == "ok"
 
-    with client.websocket_connect(f"/terminals/{opened['id']}/ws") as ws:
+    with client.websocket_connect(ws_url(client, opened["id"])) as ws:
         ws.send_json({"type": "input", "data": "echo over-the-socket\n"})
         assert "over-the-socket" in read_until(ws, "over-the-socket")
 
@@ -64,7 +72,7 @@ def test_resize_travels_over_the_socket(client, tmp_path):
         "/terminals", json={"cwd": str(tmp_path), "command": ["/bin/bash", "--norc", "-i"]}
     ).json()
 
-    with client.websocket_connect(f"/terminals/{opened['id']}/ws") as ws:
+    with client.websocket_connect(ws_url(client, opened["id"])) as ws:
         ws.send_json({"type": "resize", "rows": 50, "cols": 132})
         ws.send_json({"type": "input", "data": "tput cols\n"})
         assert "132" in read_until(ws, "132")
@@ -93,20 +101,20 @@ def test_the_session_survives_the_client_leaving(client, tmp_path):
         "/terminals", json={"cwd": str(tmp_path), "command": ["/bin/bash", "--norc", "-i"]}
     ).json()
 
-    with client.websocket_connect(f"/terminals/{opened['id']}/ws") as ws:
+    with client.websocket_connect(ws_url(client, opened["id"])) as ws:
         ws.send_json({"type": "input", "data": "echo before-disconnect\n"})
         read_until(ws, "before-disconnect")
 
     assert client.get("/terminals").json()[0]["alive"] is True
 
-    with client.websocket_connect(f"/terminals/{opened['id']}/ws") as ws:
+    with client.websocket_connect(ws_url(client, opened["id"])) as ws:
         replayed = ws.receive_text()
         assert "before-disconnect" in replayed
 
 
 def test_connecting_to_a_terminal_that_does_not_exist_is_refused(client):
     # starlette raises on the 4404 close rather than yielding a socket
-    with pytest.raises(Exception), client.websocket_connect("/terminals/nope/ws") as ws:  # noqa: B017
+    with pytest.raises(Exception), client.websocket_connect(ws_url(client, "nope")) as ws:  # noqa: B017
         ws.receive_text()
 
 
@@ -116,3 +124,19 @@ def test_closing_a_terminal_twice_reports_the_second_honestly(client, tmp_path):
     ).json()
     assert client.delete(f"/terminals/{opened['id']}").json()["status"] == "ok"
     assert client.delete(f"/terminals/{opened['id']}").json()["status"] == "not_found"
+
+
+def test_a_socket_without_a_token_carries_no_keystrokes(client, tmp_path):
+    """Middleware does not run for websockets, and this is the endpoint that
+    carries keystrokes - so it checks the token itself or nothing does."""
+    opened = client.post(
+        "/terminals", json={"cwd": str(tmp_path), "command": ["/bin/bash", "--norc", "-i"]}
+    ).json()
+
+    # starlette raises on the 4401 close rather than yielding a socket
+    for url in (
+        f"/terminals/{opened['id']}/ws",
+        f"/terminals/{opened['id']}/ws?token=wrong",
+    ):
+        with pytest.raises(Exception), client.websocket_connect(url) as ws:  # noqa: B017
+            ws.receive_text()

@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 
+from .db import Database
 from .events import EventKind, EventLog
 from .outcomes import Ok, Outcome, Refused
 
@@ -77,7 +78,7 @@ class ProposedFix:
 
 
 class ObservationStore:
-    def __init__(self, conn: sqlite3.Connection, log: EventLog) -> None:
+    def __init__(self, conn: Database, log: EventLog) -> None:
         self._conn = conn
         self._log = log
 

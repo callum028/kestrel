@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
+from .db import Database
+
 
 class EventKind(StrEnum):
     # Task lifecycle
@@ -87,7 +89,7 @@ def _to_event(row: sqlite3.Row) -> Event:
 class EventLog:
     """Append-only. The only write path into durable state."""
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: Database) -> None:
         self._conn = conn
 
     def append(

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
+from typing import Any
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -95,12 +97,57 @@ CREATE TABLE IF NOT EXISTS sessions (
 """
 
 
-def connect(path: Path) -> sqlite3.Connection:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+def _open(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(SCHEMA)
+    # Writers queue rather than failing instantly when another thread holds the
+    # write lock. WAL allows concurrent readers alongside one writer.
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
+
+
+class Database:
+    """One sqlite connection per thread, against one file.
+
+    FastAPI runs sync endpoints in a threadpool while the tick loop runs on the
+    event loop, so the connection is genuinely reached from several threads.
+    `check_same_thread=False` permits that but does not make it safe - sharing
+    one connection concurrently raises "bad parameter or other API misuse",
+    which is exactly what it did.
+
+    Per-thread connections sidestep it entirely, and WAL means readers never
+    block the writer.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._local = threading.local()
+        # Create the schema once, up front, on whichever thread builds this.
+        self._connection().executescript(SCHEMA)
+
+    def _connection(self) -> sqlite3.Connection:
+        conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = _open(self.path)
+            self._local.conn = conn
+        return conn
+
+    def execute(self, sql: str, params: tuple[Any, ...] = ()) -> sqlite3.Cursor:
+        return self._connection().execute(sql, params)
+
+    def executescript(self, script: str) -> sqlite3.Cursor:
+        return self._connection().executescript(script)
+
+    def close(self) -> None:
+        conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()
+            self._local.conn = None
+
+
+def connect(path: Path) -> Database:
+    return Database(path)

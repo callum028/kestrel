@@ -21,10 +21,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .attention import Focus, Signals
+from .auth import check_request, check_websocket, load_or_create_token
 from .config import Config
 from .events import EventKind
 from .observations import ObservationState
@@ -116,6 +118,7 @@ def _tool_signature(hook: HookIn) -> str:
 
 def create_app(config: Config | None = None, runtime: Runtime | None = None) -> FastAPI:
     rt = runtime or Runtime.build(config or Config.from_env())
+    token = load_or_create_token(rt.config.token_path)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -127,6 +130,19 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
 
     app = FastAPI(title="Kestrel", lifespan=lifespan)
     app.state.runtime = rt
+    app.state.token = token
+
+    @app.middleware("http")
+    async def require_token(request: Request, call_next):  # type: ignore[no-untyped-def]
+        # Everything is behind this. There is no unauthenticated read-only
+        # surface, because "what am I working on" is not public either.
+        try:
+            check_request(request, token)
+        except HTTPException as exc:
+            return JSONResponse(
+                {"status": "refused", "reason": exc.detail}, status_code=exc.status_code
+            )
+        return await call_next(request)
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -336,6 +352,12 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
 
     @app.websocket("/terminals/{terminal_id}/ws")
     async def terminal_ws(websocket: WebSocket, terminal_id: str) -> None:
+        # Middleware does not run for websockets, so this is checked here or
+        # not at all - and this is the endpoint that carries keystrokes.
+        if not check_websocket(websocket, token):
+            await websocket.close(code=4401, reason="bad or missing token")
+            return
+
         terminal = rt.terminals.get(terminal_id)
         if terminal is None:
             await websocket.close(code=4404, reason="no such terminal")

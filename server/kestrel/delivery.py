@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from .attention import AttentionState, Channel, Urgency, choose_channel, escalate
+from .db import Database
 from .events import EventKind, EventLog
 
 ESCALATE_AFTER = timedelta(minutes=2)
@@ -54,7 +55,7 @@ def for_voice(body: str) -> str:
 
 
 class DeliveryTracker:
-    def __init__(self, conn: sqlite3.Connection, log: EventLog) -> None:
+    def __init__(self, conn: Database, log: EventLog) -> None:
         self._conn = conn
         self._log = log
 

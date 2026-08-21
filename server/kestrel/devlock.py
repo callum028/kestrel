@@ -19,9 +19,10 @@ This, not subscription rate limits, is the real cap on useful concurrency.
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+
+from .db import Database
 
 STUCK_AFTER = timedelta(minutes=25)
 
@@ -39,7 +40,7 @@ class Hold:
 
 
 class DevLock:
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: Database) -> None:
         self._conn = conn
 
     def holder(self) -> Hold | None:

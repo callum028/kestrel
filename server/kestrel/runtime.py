@@ -7,7 +7,6 @@ conversation and all state; clients are views onto this object.
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -15,7 +14,7 @@ from kestrel_agent.terminals import TerminalManager
 
 from .attention import AttentionState, Signals, compute
 from .config import Config
-from .db import connect
+from .db import Database, connect
 from .delivery import DeliveryTracker
 from .devlock import DevLock
 from .events import EventKind, EventLog
@@ -31,7 +30,7 @@ TICK_INTERVAL_SECONDS = 30
 @dataclass
 class Runtime:
     config: Config
-    conn: sqlite3.Connection
+    conn: Database
     log: EventLog
     tasks: TaskStore
     memory: MemoryStore

@@ -13,13 +13,24 @@ from kestrel.runtime import Runtime
 
 
 @pytest.fixture
-def client(tmp_path):
-    config = Config(
+def config(tmp_path):
+    return Config(
         data_dir=tmp_path,
         db_path=tmp_path / "kestrel.db",
         memory_repo=tmp_path / "memory",
         identity_dir=tmp_path / "identity",
     )
+
+
+@pytest.fixture
+def client(config):
+    app = create_app(runtime=Runtime.build(config))
+    return TestClient(app, headers={"Authorization": f"Bearer {app.state.token}"})
+
+
+@pytest.fixture
+def anonymous(config):
+    """No credentials - stands in for anything that finds the port."""
     return TestClient(create_app(runtime=Runtime.build(config)))
 
 
@@ -156,3 +167,40 @@ def test_speech_is_suppressed_during_a_meeting(client):
 def test_acknowledging_an_unknown_delivery_says_so(client):
     body = client.post("/deliveries/nope/ack", json={"on": "desktop"}).json()
     assert body["status"] == "not_found"
+
+
+# --- authentication ---------------------------------------------------------
+# POST /terminals spawns a process with Callum's keys and repos, so "who can
+# reach the API" is the whole security model.
+
+
+def test_nothing_is_readable_without_a_token(anonymous):
+    for path in ("/health", "/state", "/tasks", "/events", "/deliveries"):
+        assert anonymous.get(path).status_code == 401, path
+
+
+def test_a_wrong_token_is_refused(anonymous):
+    response = anonymous.get("/health", headers={"Authorization": "Bearer not-the-token"})
+    assert response.status_code == 401
+    assert response.json()["status"] == "refused"
+
+
+def test_spawning_a_process_without_a_token_is_refused(anonymous, tmp_path):
+    response = anonymous.post("/terminals", json={"cwd": str(tmp_path)})
+    assert response.status_code == 401
+
+
+def test_a_web_page_cannot_use_the_port_even_with_the_token(client):
+    """Loopback is not a boundary for a browser: any page you have open can
+    reach localhost. Origin is what separates a client from a tab."""
+    response = client.get("/health", headers={"Origin": "https://evil.example.com"})
+    assert response.status_code == 403
+    assert "origin not allowed" in response.json()["reason"]
+
+
+def test_the_real_client_origin_is_allowed(client):
+    assert client.get("/health", headers={"Origin": "http://localhost:5173"}).status_code == 200
+
+
+def test_a_non_browser_caller_sends_no_origin_and_is_fine(client):
+    assert client.get("/health").status_code == 200
