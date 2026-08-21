@@ -50,10 +50,16 @@ const BASE = import.meta.env.VITE_API_BASE ?? "";
 declare global {
   interface Window {
     __KESTREL_TOKEN__?: string;
+    /** Where the desktop shell found the token, or "none". A release build has
+     *  no console, so this is the only way a missing token can be explained. */
+    __KESTREL_TOKEN_SOURCE__?: string;
   }
 }
 
-const TOKEN = window.__KESTREL_TOKEN__ ?? import.meta.env.VITE_KESTREL_TOKEN ?? "";
+const TOKEN = window.__KESTREL_TOKEN__ || import.meta.env.VITE_KESTREL_TOKEN || "";
+
+export const tokenSource = window.__KESTREL_TOKEN_SOURCE__;
+export const hasToken = TOKEN.length > 0;
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = { Authorization: `Bearer ${TOKEN}` };

@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type Delivery, type State, type Task, type TerminalInfo } from "./api";
+import {
+  api,
+  hasToken,
+  type Delivery,
+  type State,
+  type Task,
+  type TerminalInfo,
+} from "./api";
 import { TerminalPane, disposeTerminal } from "./TerminalPane";
 
 const POLL_MS = 3000;
@@ -93,6 +100,33 @@ export default function App() {
     setActiveTerminal((current) => (current === id ? null : current));
     await refresh();
   };
+
+  if (!hasToken) {
+    // Say what is wrong and how to fix it. A window that silently fails to
+    // load anything is indistinguishable from a broken build.
+    return (
+      <div className="app">
+        <header className="topbar">
+          <span className="brand">Kestrel</span>
+        </header>
+        <div className="placeholder">
+          <div style={{ maxWidth: 520, textAlign: "left", lineHeight: 1.6 }}>
+            <p style={{ color: "var(--warn)", marginTop: 0 }}>No API token found.</p>
+            <p>
+              The server writes one to <code>~/.kestrel/token</code> on first start. This app
+              looks for it in <code>KESTREL_TOKEN</code>, then <code>KESTREL_TOKEN_FILE</code>,
+              then <code>%USERPROFILE%\.kestrel\token</code>, then across{" "}
+              <code>\\wsl.localhost</code>.
+            </p>
+            <p style={{ color: "var(--text-faint)" }}>
+              Start the server, then reopen. If it runs in WSL under a different user, set{" "}
+              <code>KESTREL_WSL_USER</code>.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app">
