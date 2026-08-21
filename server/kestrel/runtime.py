@@ -11,6 +11,8 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from kestrel_agent.terminals import TerminalManager
+
 from .attention import AttentionState, Signals, compute
 from .config import Config
 from .db import connect
@@ -37,6 +39,7 @@ class Runtime:
     deliveries: DeliveryTracker
     dev_lock: DevLock
     orchestrator: Orchestrator
+    terminals: TerminalManager
     executors: dict[str, Executor] = field(default_factory=dict)
 
     # Latest raw report from whichever client last spoke. Sensors, not beliefs -
@@ -62,6 +65,7 @@ class Runtime:
             deliveries=deliveries,
             dev_lock=dev_lock,
             orchestrator=Orchestrator(tasks, log, deliveries, dev_lock, executors),
+            terminals=TerminalManager(),
             executors=executors,
         )
 

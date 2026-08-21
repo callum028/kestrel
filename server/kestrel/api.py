@@ -18,9 +18,10 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from .attention import Focus, Signals
@@ -92,6 +93,14 @@ class BindIn(BaseModel):
 
 class AckIn(BaseModel):
     on: str
+
+
+class TerminalIn(BaseModel):
+    cwd: str
+    command: list[str] | None = None
+    task_handle: str | None = None
+    rows: int = 40
+    cols: int = 120
 
 
 def _tool_signature(hook: HookIn) -> str:
@@ -273,6 +282,91 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
     def resolve_observation(obs_id: str, state: ObservationState) -> dict[str, Any]:
         rt.observations.resolve(obs_id, state)
         return {"status": "ok", "state": state}
+
+    # --- terminals ----------------------------------------------------------
+    # Terminals are a first-class surface, not a session viewer: N of them, some
+    # bound to a task and its worktree, some just a shell in a directory. The
+    # PTY lives in the agent, so closing a client never kills the work.
+
+    # These two must be async: they attach and detach an event-loop reader, and
+    # FastAPI runs sync endpoints in a threadpool where there is no running loop.
+    @app.post("/terminals")
+    async def open_terminal(body: TerminalIn) -> dict[str, Any]:
+        task_id = None
+        if body.task_handle:
+            task = rt.tasks.by_handle(body.task_handle)
+            if task is None:
+                return {
+                    "status": "not_found",
+                    "searched_for": body.task_handle,
+                    "looked_in": "tasks",
+                }
+            task_id = task.id
+        cwd = Path(body.cwd).expanduser()
+        if not cwd.is_dir():
+            return {"status": "not_found", "searched_for": str(cwd), "looked_in": "filesystem"}
+        terminal = rt.terminals.create(
+            cwd=cwd, command=body.command, task_id=task_id, rows=body.rows, cols=body.cols
+        )
+        return {
+            "status": "ok",
+            "id": terminal.id,
+            "cwd": str(terminal.cwd),
+            "task_id": terminal.task_id,
+        }
+
+    @app.get("/terminals")
+    def list_terminals() -> list[dict[str, Any]]:
+        return [
+            {
+                "id": t.id,
+                "cwd": str(t.cwd),
+                "task_id": t.task_id,
+                "alive": t.alive,
+                "command": t.command,
+            }
+            for t in rt.terminals.list()
+        ]
+
+    @app.delete("/terminals/{terminal_id}")
+    async def close_terminal(terminal_id: str) -> dict[str, Any]:
+        if not rt.terminals.close(terminal_id):
+            return {"status": "not_found", "searched_for": terminal_id, "looked_in": "terminals"}
+        return {"status": "ok"}
+
+    @app.websocket("/terminals/{terminal_id}/ws")
+    async def terminal_ws(websocket: WebSocket, terminal_id: str) -> None:
+        terminal = rt.terminals.get(terminal_id)
+        if terminal is None:
+            await websocket.close(code=4404, reason="no such terminal")
+            return
+
+        await websocket.accept()
+        queue = terminal.subscribe()
+
+        async def pump_out() -> None:
+            while True:
+                chunk = await queue.get()
+                if chunk is None:
+                    await websocket.send_json({"type": "exit", "code": terminal.exit_code})
+                    return
+                await websocket.send_text(chunk.decode("utf-8", errors="replace"))
+
+        async def pump_in() -> None:
+            while True:
+                message = await websocket.receive_json()
+                if message.get("type") == "input":
+                    await terminal.write(message["data"].encode())
+                elif message.get("type") == "resize":
+                    terminal.resize(int(message["rows"]), int(message["cols"]))
+
+        try:
+            await asyncio.gather(pump_out(), pump_in())
+        except WebSocketDisconnect:
+            pass
+        finally:
+            # The client goes; the session stays. That is the whole point.
+            terminal.unsubscribe(queue)
 
     @app.post("/tick")
     async def tick() -> dict[str, Any]:

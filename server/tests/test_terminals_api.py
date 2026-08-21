@@ -1,0 +1,118 @@
+"""Terminals over HTTP and WebSocket - the surface the app actually talks to."""
+
+import pytest
+from fastapi.testclient import TestClient
+
+from kestrel.api import create_app
+from kestrel.config import Config
+from kestrel.runtime import Runtime
+
+
+@pytest.fixture
+def client(tmp_path):
+    config = Config(
+        data_dir=tmp_path,
+        db_path=tmp_path / "kestrel.db",
+        memory_repo=tmp_path / "memory",
+        identity_dir=tmp_path / "identity",
+    )
+    rt = Runtime.build(config)
+    with TestClient(create_app(runtime=rt)) as c:
+        yield c
+    rt.terminals.close_all()
+
+
+def read_until(ws, needle: str, limit: int = 60) -> str:
+    """A PTY delivers in arbitrary chunks; asserting on one frame is flaky."""
+    buffer = ""
+    for _ in range(limit):
+        message = ws.receive()
+        if message.get("type") == "websocket.close":
+            break
+        text = message.get("text") or ""
+        buffer += text
+        if needle in buffer:
+            break
+    return buffer
+
+
+def test_opening_a_terminal_in_a_missing_directory_says_so(client, tmp_path):
+    body = client.post("/terminals", json={"cwd": str(tmp_path / "nope")}).json()
+    assert body["status"] == "not_found"
+    assert body["looked_in"] == "filesystem"
+
+
+def test_opening_against_an_unknown_task_says_so(client, tmp_path):
+    body = client.post("/terminals", json={"cwd": str(tmp_path), "task_handle": "KES-999"}).json()
+    assert body["status"] == "not_found"
+    assert body["looked_in"] == "tasks"
+
+
+def test_a_free_terminal_echoes_what_it_is_sent(client, tmp_path):
+    opened = client.post(
+        "/terminals", json={"cwd": str(tmp_path), "command": ["/bin/bash", "--norc", "-i"]}
+    ).json()
+    assert opened["status"] == "ok"
+
+    with client.websocket_connect(f"/terminals/{opened['id']}/ws") as ws:
+        ws.send_json({"type": "input", "data": "echo over-the-socket\n"})
+        assert "over-the-socket" in read_until(ws, "over-the-socket")
+
+
+def test_resize_travels_over_the_socket(client, tmp_path):
+    opened = client.post(
+        "/terminals", json={"cwd": str(tmp_path), "command": ["/bin/bash", "--norc", "-i"]}
+    ).json()
+
+    with client.websocket_connect(f"/terminals/{opened['id']}/ws") as ws:
+        ws.send_json({"type": "resize", "rows": 50, "cols": 132})
+        ws.send_json({"type": "input", "data": "tput cols\n"})
+        assert "132" in read_until(ws, "132")
+
+
+def test_a_terminal_bound_to_a_task_is_listed_against_it(client, tmp_path):
+    client.post("/tasks", json={"handle": "KES-31", "goal": "auth", "criteria": []})
+    opened = client.post(
+        "/terminals",
+        json={
+            "cwd": str(tmp_path),
+            "task_handle": "KES-31",
+            "command": ["/bin/bash", "--norc", "-i"],
+        },
+    ).json()
+
+    listed = client.get("/terminals").json()
+    assert [t["id"] for t in listed] == [opened["id"]]
+    assert listed[0]["task_id"] == opened["task_id"]
+    assert listed[0]["alive"] is True
+
+
+def test_the_session_survives_the_client_leaving(client, tmp_path):
+    """Closing the app must not kill the work - and reattaching must not be blind."""
+    opened = client.post(
+        "/terminals", json={"cwd": str(tmp_path), "command": ["/bin/bash", "--norc", "-i"]}
+    ).json()
+
+    with client.websocket_connect(f"/terminals/{opened['id']}/ws") as ws:
+        ws.send_json({"type": "input", "data": "echo before-disconnect\n"})
+        read_until(ws, "before-disconnect")
+
+    assert client.get("/terminals").json()[0]["alive"] is True
+
+    with client.websocket_connect(f"/terminals/{opened['id']}/ws") as ws:
+        replayed = ws.receive_text()
+        assert "before-disconnect" in replayed
+
+
+def test_connecting_to_a_terminal_that_does_not_exist_is_refused(client):
+    # starlette raises on the 4404 close rather than yielding a socket
+    with pytest.raises(Exception), client.websocket_connect("/terminals/nope/ws") as ws:  # noqa: B017
+        ws.receive_text()
+
+
+def test_closing_a_terminal_twice_reports_the_second_honestly(client, tmp_path):
+    opened = client.post(
+        "/terminals", json={"cwd": str(tmp_path), "command": ["/bin/bash", "--norc", "-i"]}
+    ).json()
+    assert client.delete(f"/terminals/{opened['id']}").json()["status"] == "ok"
+    assert client.delete(f"/terminals/{opened['id']}").json()["status"] == "not_found"

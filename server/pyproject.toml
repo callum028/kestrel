@@ -7,6 +7,9 @@ dependencies = [
     "pydantic>=2.7",
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
+    # Co-located for v0: both halves run in WSL, so the server imports the
+    # executor directly. Installed from ../agent with `pip install -e`.
+    "kestrel-agent",
 ]
 
 [project.optional-dependencies]
