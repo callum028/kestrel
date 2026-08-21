@@ -472,8 +472,20 @@ Both are the same primitive. The difference is only whether a task owns it. Tabs
 colours, resize, copy/paste and a remembered working directory are all requirements, not polish —
 a terminal that is 90% as good as the one he has is a terminal he will not use.
 
-File editing stays outside: the diff pane covers review, and an editor covers the rest. GitHub and
-Notion panes are worth having and are explicitly v2.
+File editing stays outside: the diff pane covers review, and an editor covers the rest.
+
+### Layout: tabs are capabilities, conversation is not
+
+The app is a tab per capability — **Work** first (terminals, tasks, diffs, and later GitHub and
+Notion panes), with commitments, calendar and the rest arriving as their own tabs. That mirrors the
+executor split exactly, so a new capability adds a tab instead of forcing a restructure.
+
+**Conversation is not one of the tabs.** It sits alongside them, always present. If talking to
+Kestrel means navigating away from what you are looking at, shared focus is dead and it degrades
+into a chatbot in a sidebar. The conversation is the constant; the tab is the context it is talking
+about.
+
+Which also defines what the client reports as focus: the active tab, plus the selection inside it.
 
 **The session never waits.** Get up for coffee, Claude asks a question, it routes to the phone,
 answer in a sentence, work continues. Callum stops being the bottleneck for a session at his own
