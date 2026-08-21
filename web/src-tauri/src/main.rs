@@ -35,24 +35,52 @@ fn read_at(path: &Path) -> Option<Found> {
     (!token.is_empty()).then(|| Found { token, source: path.display().to_string() })
 }
 
+/// Distro names, via `wsl.exe -l -q`.
+///
+/// `\\wsl.localhost` cannot be enumerated as a directory - a direct path under
+/// it resolves fine, but listing the root returns nothing, which made the first
+/// attempt at this silently find no token at all. Everything one level deeper
+/// *is* enumerable, so only the distro list needs another source.
+///
+/// Output is UTF-16LE; dropping nulls is enough for names that are ASCII in
+/// practice.
+fn wsl_distros() -> Vec<String> {
+    let mut command = std::process::Command::new("wsl.exe");
+    command.args(["-l", "-q"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW); // no console flash on launch
+    }
+
+    let Ok(output) = command.output() else {
+        return Vec::new();
+    };
+    let cleaned: Vec<u8> = output.stdout.into_iter().filter(|byte| *byte != 0).collect();
+    String::from_utf8_lossy(&cleaned)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The server usually runs in WSL while this runs on Windows, so the WSL
-/// filesystem is a first-class place to look rather than a fallback. Walking
-/// `\\wsl.localhost` means no environment variable has to be set by hand.
+/// filesystem is a first-class place to look rather than a fallback. Doing it
+/// automatically means no environment variable has to be set by hand.
 fn from_wsl() -> Option<Found> {
     let user = std::env::var("KESTREL_WSL_USER").ok();
-
-    let distros: Vec<PathBuf> = match std::env::var("KESTREL_WSL_DISTRO") {
-        Ok(distro) => vec![PathBuf::from(format!(r"\\wsl.localhost\{distro}"))],
-        Err(_) => std::fs::read_dir(r"\\wsl.localhost")
-            .ok()?
-            .filter_map(|entry| entry.ok().map(|e| e.path()))
-            .collect(),
+    let distros = match std::env::var("KESTREL_WSL_DISTRO") {
+        Ok(distro) => vec![distro],
+        Err(_) => wsl_distros(),
     };
 
     for distro in distros {
+        let home_root = PathBuf::from(format!(r"\\wsl.localhost\{distro}")).join("home");
         let homes: Vec<PathBuf> = match &user {
-            Some(name) => vec![distro.join("home").join(name)],
-            None => std::fs::read_dir(distro.join("home"))
+            Some(name) => vec![home_root.join(name)],
+            None => std::fs::read_dir(&home_root)
                 .into_iter()
                 .flatten()
                 .filter_map(|entry| entry.ok().map(|e| e.path()))
