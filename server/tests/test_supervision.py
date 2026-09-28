@@ -14,12 +14,13 @@ from kestrel.supervision import (
     Diff,
     StallReason,
     detect,
+    extract_blocked_claim,
     introduced_blocker_markers,
     next_action,
     unrequested_spec_changes,
     validate_blocker,
 )
-from kestrel.tasks import TaskState
+from kestrel.tasks import Task, TaskState
 
 NOW = datetime(2026, 8, 20, 2, 0, tzinfo=UTC)
 
@@ -129,3 +130,98 @@ def test_markers_asserting_a_dependency_are_surfaced():
         files=[],
     )
     assert introduced_blocker_markers(diff) == ["// TODO: re-enable once LEGACY_SYNC is turned on"]
+
+
+# --- new detectors: idle-with-no-wait, startup, process death, pending waits -
+
+
+def test_idle_with_no_hook_activity_and_no_wait_is_a_stall(tasks, log):
+    t = running_task(tasks)
+    later = t.created_at + timedelta(minutes=25)
+    events = poll_events(log, t.id, 1)  # one event, then silence
+    # Force the single event's timestamp far enough in the past by using a
+    # `now` far ahead of it - poll_events uses real wall-clock timestamps, so
+    # the "later" here only needs to be far enough past *now*, which it is.
+    verdict = detect(t, events, later)
+    assert verdict.stalled
+    assert verdict.reason is StallReason.IDLE_NO_WAIT
+    assert "kestrel-wait" in verdict.evidence
+
+
+def test_a_pending_wait_suppresses_idle_and_no_progress():
+    t_created = NOW
+
+    t = Task(
+        id="t1",
+        handle="KES-99",
+        goal="goal",
+        criteria=[],
+        executor="claude_code",
+        state=TaskState.RUNNING,
+        created_at=t_created,
+        last_progress_at=t_created,
+    )
+    later = t_created + timedelta(minutes=40)
+    verdict = detect(t, [], later, has_pending_wait=True)
+    assert not verdict.stalled
+
+
+def test_a_pending_wait_does_not_suppress_the_wall_clock_budget():
+
+    t = Task(
+        id="t1",
+        handle="KES-99",
+        goal="goal",
+        criteria=[],
+        executor="claude_code",
+        state=TaskState.RUNNING,
+        created_at=NOW,
+    )
+    verdict = detect(
+        t,
+        [],
+        NOW + timedelta(hours=9),
+        Budget(wall_clock=timedelta(hours=2)),
+        has_pending_wait=True,
+    )
+    assert verdict.reason is StallReason.WALL_CLOCK
+
+
+def test_startup_stuck_when_session_never_gets_past_the_prompt(tasks, log):
+    t = running_task(tasks)
+    log.append(EventKind.SESSION_STARTED, "kestrel", {}, task_id=t.id)
+    events = log.for_task(t.id)
+    started_at = next(e.ts for e in events if e.kind is EventKind.SESSION_STARTED)
+
+    verdict = detect(t, events, started_at + timedelta(minutes=10))
+    assert verdict.stalled
+    assert verdict.reason is StallReason.STARTUP_STUCK
+
+
+def test_startup_is_fine_once_session_bound_fires(tasks, log):
+    t = running_task(tasks)
+    log.append(EventKind.SESSION_STARTED, "kestrel", {}, task_id=t.id)
+    log.append(EventKind.SESSION_BOUND, "agent", {}, task_id=t.id)
+    events = log.for_task(t.id)
+    started_at = next(e.ts for e in events if e.kind is EventKind.SESSION_STARTED)
+
+    verdict = detect(t, events, started_at + timedelta(minutes=10))
+    assert verdict.reason is not StallReason.STARTUP_STUCK
+
+
+def test_startup_is_fine_once_a_prompt_is_submitted(tasks, log):
+    t = running_task(tasks)
+    log.append(EventKind.SESSION_STARTED, "kestrel", {}, task_id=t.id)
+    log.append(EventKind.PROMPT_SUBMITTED, "claude", {"prompt": "go"}, task_id=t.id)
+    events = log.for_task(t.id)
+    started_at = next(e.ts for e in events if e.kind is EventKind.SESSION_STARTED)
+
+    verdict = detect(t, events, started_at + timedelta(minutes=10))
+    assert verdict.reason is not StallReason.STARTUP_STUCK
+
+
+def test_extract_blocked_claim_finds_what_a_claim_says_its_stuck_on():
+    assert extract_blocked_claim("I'm blocked on LEGACY_SYNC being enabled") == "LEGACY_SYNC"
+    assert extract_blocked_claim("Waiting on `FEATURE_X` to land") == "FEATURE_X"
+    assert extract_blocked_claim("Done, all tests pass.") is None
+    assert extract_blocked_claim(None) is None

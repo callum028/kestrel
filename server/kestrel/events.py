@@ -39,6 +39,9 @@ class EventKind(StrEnum):
     # Session activity. Note this is activity, not progress - the distinction is
     # the whole point of the stall detector.
     TOOL_CALL = "session.tool_call"
+    PROMPT_SUBMITTED = "session.prompt_submitted"  # UserPromptSubmit - also
+    # proof the session got past any startup dialog, for the startup-stall
+    # detector.
 
     # Executor lifecycle - a session starting or ending, distinct from the
     # task state machine in tasks.py (an executor can be restarted without
@@ -50,8 +53,24 @@ class EventKind(StrEnum):
     # Supervision
     STALL_DETECTED = "supervision.stall_detected"
     NUDGE_SENT = "supervision.nudge_sent"
+    NUDGE_HELD_BACK = "supervision.nudge_held_back"
     CLAIM_REJECTED = "supervision.claim_rejected"
+    CLAIM_ACCEPTED = "supervision.claim_accepted"
     VALIDATION_RUN = "supervision.validation_run"
+
+    # Kestrel-owned waits - see waits.py. Claude registers one instead of
+    # arming its own watcher; Kestrel polls the real thing and wakes the
+    # session, or escalates on deadline expiry.
+    WAIT_REGISTERED = "wait.registered"
+    WAIT_RESOLVED = "wait.resolved"
+    WAIT_EXPIRED = "wait.expired"
+
+    # GitHub - PR discovery, CI status, merge-on-green. Mechanical, same as
+    # the board: a deterministic side-effect of what the tick observes, never
+    # a model decision.
+    PR_DETECTED = "github.pr_detected"
+    CI_CHECKED = "github.ci_checked"
+    PR_MERGED = "github.pr_merged"
 
     # Observations
     OBSERVATION_RAISED = "observation.raised"
@@ -80,6 +99,11 @@ class EventKind(StrEnum):
     TICK_FAILED = "system.tick_failed"
     SESSION_BOUND = "system.session_bound"
     HOOK_UNATTRIBUTED = "system.hook_unattributed"
+
+    # Restart reconciliation - a task believed running is checked against the
+    # session host on startup; anything unaccountable is reported, never
+    # assumed healthy.
+    RECONCILE_UNACCOUNTABLE = "system.reconcile_unaccountable"
 
 
 @dataclass(frozen=True)

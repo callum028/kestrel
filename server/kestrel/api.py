@@ -35,6 +35,7 @@ from .events import EventKind
 from .observations import ObservationState
 from .runtime import Runtime
 from .tasks import IllegalTransition, TaskState
+from .waits import WaitKind
 
 
 class SignalsIn(BaseModel):
@@ -70,16 +71,44 @@ class SignalsIn(BaseModel):
 
 
 class HookIn(BaseModel):
-    """Claude Code hook payload. Field names follow the hook contract; extras are
-    tolerated because the shape is not ours to control."""
+    """Claude Code hook payload. Field names verified against
+    code.claude.com/docs/en/hooks.md (fetched directly, not summarised) as of
+    this writing:
+
+    - `Notification`: `message` (the notification text) and `notification_type`
+      (e.g. `permission_prompt`, `idle_prompt`).
+    - `Stop` / `SubagentStop`: `last_assistant_message` (the claim's own text -
+      what claim validation scans for a stated blocker) and `stop_reason`.
+    - `UserPromptSubmit`: `user_prompt` - also the signal that a session got
+      past any startup dialog (see the startup-stall detector).
+    - `SessionStart`: `session_start_reason`.
+
+    Extras are tolerated regardless, because the shape is not ours to control
+    and a docs update must never turn into a 422 on every hook firing.
+    """
 
     hook_event_name: str
     session_id: str | None = None
     tool_name: str | None = None
     tool_input: dict[str, Any] | None = None
     message: str | None = None
+    notification_type: str | None = None
+    last_assistant_message: str | None = None
+    stop_reason: str | None = None
+    user_prompt: str | None = None
+    session_start_reason: str | None = None
 
     model_config = {"extra": "allow"}
+
+
+class WaitIn(BaseModel):
+    """What `kestrel-wait` posts (see `kestrel_agent.kestrel_wait`) instead of
+    the session arming its own watcher."""
+
+    task_handle: str
+    kind: WaitKind
+    params: dict[str, Any] = Field(default_factory=dict)
+    timeout_minutes: float | None = None
 
 
 class TaskIn(BaseModel):
@@ -150,6 +179,10 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        # Never assume a task believed running is still healthy just because
+        # it was last seen that way - checked against the session host before
+        # the first tick, and reported if it is not there.
+        await rt.reconcile_on_startup()
         ticker = asyncio.create_task(rt.run())
         try:
             yield
@@ -222,7 +255,7 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
         return {"presence": state.presence, "speech_suppressed": state.speech_suppressed}
 
     @app.post("/hooks/claude")
-    def claude_hook(hook: HookIn) -> dict[str, Any]:
+    async def claude_hook(hook: HookIn) -> dict[str, Any]:
         task_id = rt.task_for_session(hook.session_id) if hook.session_id else None
         if task_id is None:
             # Recorded anyway. An unattributed hook is a gap in supervision, not
@@ -244,12 +277,51 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
             )
         elif event == "Notification":
             rt.log.append(
-                EventKind.TASK_QUESTION, "claude", {"message": hook.message}, task_id=task_id
+                EventKind.TASK_QUESTION,
+                "claude",
+                {"message": hook.message, "notification_type": hook.notification_type},
+                task_id=task_id,
+            )
+        elif event == "UserPromptSubmit":
+            # Also the signal a session got past any startup dialog - see the
+            # startup-stall detector in supervision.py.
+            rt.log.append(
+                EventKind.PROMPT_SUBMITTED, "claude", {"prompt": hook.user_prompt}, task_id=task_id
             )
         elif event in ("Stop", "SubagentStop"):
-            # A claim, not a fact. Validation decides.
-            rt.log.append(EventKind.TASK_CLOSED, "claude", {"claimed": "done"}, task_id=task_id)
+            # A claim, not a fact. Validation decides - and does so here,
+            # synchronously, so a bad claim gets pushed back before the
+            # session has moved on to anything else.
+            rt.log.append(
+                EventKind.TASK_CLOSED,
+                "claude",
+                {
+                    "claimed": "done",
+                    "last_assistant_message": hook.last_assistant_message,
+                    "stop_reason": hook.stop_reason,
+                },
+                task_id=task_id,
+            )
+            await rt.check_completion_claim(task_id, hook.last_assistant_message)
         return {"status": "ok", "task_id": task_id, "event": event}
+
+    @app.post("/waits")
+    def register_wait(body: WaitIn) -> dict[str, Any]:
+        outcome = rt.register_wait(body.task_handle, body.kind, body.params, body.timeout_minutes)
+        return outcome.model_dump()
+
+    @app.get("/waits")
+    def list_waits() -> list[dict[str, Any]]:
+        return [
+            {
+                "id": w.id,
+                "task_id": w.task_id,
+                "kind": w.kind,
+                "params": w.params,
+                "deadline": w.deadline.isoformat(),
+            }
+            for w in rt.waits.active()
+        ]
 
     @app.post("/sessions/bind")
     def bind(body: BindIn) -> dict[str, Any]:

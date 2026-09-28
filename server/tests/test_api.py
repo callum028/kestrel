@@ -107,7 +107,7 @@ def test_stop_is_recorded_as_a_claim_not_a_completion(client):
     client.post("/hooks/claude", json={"hook_event_name": "Stop", "session_id": "sess-1"})
 
     closed = [e for e in client.get("/events").json() if e["kind"] == "task.closed"]
-    assert closed[0]["payload"] == {"claimed": "done"}
+    assert closed[0]["payload"]["claimed"] == "done"
 
     # and the task is emphatically not done
     assert client.get("/tasks").json()[0]["state"] == "created"
@@ -204,3 +204,88 @@ def test_the_real_client_origin_is_allowed(client):
 
 def test_a_non_browser_caller_sends_no_origin_and_is_fine(client):
     assert client.get("/health").status_code == 200
+
+
+# --- hook payload correctness (item 6) --------------------------------------
+
+
+def test_notification_carries_message_and_notification_type(client):
+    make_task(client)
+    client.post("/sessions/bind", json={"session_id": "sess-1", "task_handle": "KES-31"})
+    client.post(
+        "/hooks/claude",
+        json={
+            "hook_event_name": "Notification",
+            "session_id": "sess-1",
+            "message": "Bash wants to run: npm test",
+            "notification_type": "permission_prompt",
+        },
+    )
+
+    questions = [e for e in client.get("/events").json() if e["kind"] == "task.question"]
+    assert questions[0]["payload"] == {
+        "message": "Bash wants to run: npm test",
+        "notification_type": "permission_prompt",
+    }
+
+
+def test_user_prompt_submit_is_recorded_not_dropped(client):
+    """Previously fell through every branch silently - HOOK_EVENTS listed it,
+    the hook fired, and nothing was ever logged for it."""
+    make_task(client)
+    client.post("/sessions/bind", json={"session_id": "sess-1", "task_handle": "KES-31"})
+    client.post(
+        "/hooks/claude",
+        json={"hook_event_name": "UserPromptSubmit", "session_id": "sess-1", "user_prompt": "go"},
+    )
+
+    prompts = [e for e in client.get("/events").json() if e["kind"] == "session.prompt_submitted"]
+    assert len(prompts) == 1
+    assert prompts[0]["payload"] == {"prompt": "go"}
+
+
+def test_stop_carries_the_claims_own_text(client):
+    make_task(client)
+    client.post("/sessions/bind", json={"session_id": "sess-1", "task_handle": "KES-31"})
+    client.post(
+        "/hooks/claude",
+        json={
+            "hook_event_name": "Stop",
+            "session_id": "sess-1",
+            "last_assistant_message": "Done, all tests pass.",
+            "stop_reason": "end_turn",
+        },
+    )
+
+    closed = [e for e in client.get("/events").json() if e["kind"] == "task.closed"]
+    assert closed[0]["payload"]["last_assistant_message"] == "Done, all tests pass."
+    assert closed[0]["payload"]["stop_reason"] == "end_turn"
+
+
+# --- kestrel-owned waits (item 1) --------------------------------------------
+
+
+def test_registering_a_wait_for_an_unknown_task_says_so(client):
+    body = client.post(
+        "/waits", json={"task_handle": "KES-999", "kind": "ci", "params": {"branch": "x"}}
+    ).json()
+    assert body["status"] == "not_found"
+
+
+def test_registering_and_listing_a_wait(client):
+    make_task(client)
+    body = client.post(
+        "/waits",
+        json={
+            "task_handle": "KES-31",
+            "kind": "ci",
+            "params": {"branch": "kestrel/KES-31"},
+            "timeout_minutes": 5,
+        },
+    ).json()
+    assert body["status"] == "ok"
+
+    waits = client.get("/waits").json()
+    assert len(waits) == 1
+    assert waits[0]["kind"] == "ci"
+    assert waits[0]["params"] == {"branch": "kestrel/KES-31"}
