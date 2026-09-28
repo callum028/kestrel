@@ -10,6 +10,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
+from ..outcomes import Outcome
 from ..tasks import Task
 
 
@@ -28,11 +29,16 @@ class Executor(Protocol):
         """Begin work. Emits events; never returns a result directly."""
         ...
 
-    async def send(self, task: Task, message: str) -> None:
+    async def send(self, task: Task, message: str) -> Outcome:
         """Deliver input mid-flight - a relayed answer, or a nudge.
 
         For Claude Code this writes into the same session rather than opening a
-        parallel channel, which is why the write path needs a lock.
+        parallel channel, which is why the write path needs a lock - and why
+        this can be refused rather than just done: if a human is already
+        typing into that session, writing anyway would interleave with their
+        keystrokes. `Refused` (from outcomes.py) is the shape of that outcome,
+        the same way it is everywhere else in this codebase - an executor
+        never gets to fail silently.
         """
         ...
 

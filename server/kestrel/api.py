@@ -456,6 +456,11 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
             while True:
                 message = await websocket.receive_json()
                 if message.get("type") == "input":
+                    # The only path a human's keystrokes take - an executor
+                    # writes into the same PTY straight through
+                    # `rt.terminals`, never through this websocket - so this
+                    # is the one true place to record "a human is here".
+                    rt.human_activity.mark(terminal_id)
                     await terminal.write(message["data"].encode())
                 elif message.get("type") == "resize":
                     await terminal.resize(int(message["rows"]), int(message["cols"]))

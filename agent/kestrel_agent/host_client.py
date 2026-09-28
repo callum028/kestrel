@@ -204,9 +204,16 @@ class SessionHostClient:
         task_id: str | None = None,
         rows: int = 40,
         cols: int = 120,
+        env: dict[str, str] | None = None,
     ) -> RemoteTerminal:
         result = await self._call(
-            "create", cwd=str(cwd), command=command, task_id=task_id, rows=rows, cols=cols
+            "create",
+            cwd=str(cwd),
+            command=command,
+            task_id=task_id,
+            rows=rows,
+            cols=cols,
+            env=env,
         )
         return self._terminal_from(result)
 

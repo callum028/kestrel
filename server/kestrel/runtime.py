@@ -18,11 +18,13 @@ from .db import Database, connect
 from .delivery import DeliveryTracker
 from .devlock import DevLock
 from .events import EventKind, EventLog
-from .executors import Executor
+from .executors import Executor, ExecutorKind
+from .executors.claude_code import ClaudeCodeConfig, ClaudeCodeExecutor
 from .memory import MemoryStore
 from .observations import ObservationStore
 from .orchestrator import Orchestrator, TickReport
 from .tasks import TaskStore
+from .terminal_activity import HumanActivityTracker
 
 TICK_INTERVAL_SECONDS = 30
 
@@ -39,6 +41,7 @@ class Runtime:
     dev_lock: DevLock
     orchestrator: Orchestrator
     terminals: SessionHostClient
+    human_activity: HumanActivityTracker = field(default_factory=HumanActivityTracker)
     executors: dict[str, Executor] = field(default_factory=dict)
 
     # Latest raw report from whichever client last spoke. Sensors, not beliefs -
@@ -53,7 +56,32 @@ class Runtime:
         tasks = TaskStore(conn, log)
         deliveries = DeliveryTracker(conn, log)
         dev_lock = DevLock(conn)
+        terminals = SessionHostClient(config.session_host_socket)
+        human_activity = HumanActivityTracker()
+
+        # Auto-registered only when the caller hasn't opted to hand its own
+        # executors dict in (tests, mostly) and there is at least one project
+        # configured to run Claude Code against - a bare `Config` built by
+        # hand, as most tests do, has neither and gets the pre-existing empty
+        # dict, unchanged.
+        if executors is None and config.claude_projects:
+            executors = {
+                str(ExecutorKind.CLAUDE_CODE): ClaudeCodeExecutor(
+                    config=ClaudeCodeConfig(
+                        projects=config.claude_projects,
+                        worktrees_root=config.worktrees_root,
+                        server_url=config.server_url,
+                        data_dir=config.data_dir,
+                        claude_binary=config.claude_binary,
+                        claude_base_args=config.claude_base_args,
+                    ),
+                    log=log,
+                    terminals=terminals,
+                    human_activity=human_activity,
+                )
+            }
         executors = executors or {}
+
         return cls(
             config=config,
             conn=conn,
@@ -64,7 +92,8 @@ class Runtime:
             deliveries=deliveries,
             dev_lock=dev_lock,
             orchestrator=Orchestrator(tasks, log, deliveries, dev_lock, executors),
-            terminals=SessionHostClient(config.session_host_socket),
+            terminals=terminals,
+            human_activity=human_activity,
             executors=executors,
         )
 

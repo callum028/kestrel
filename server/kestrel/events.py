@@ -32,6 +32,13 @@ class EventKind(StrEnum):
     # the whole point of the stall detector.
     TOOL_CALL = "session.tool_call"
 
+    # Executor lifecycle - a session starting or ending, distinct from the
+    # task state machine in tasks.py (an executor can be restarted without
+    # the task itself changing state).
+    SESSION_STARTED = "executor.session_started"
+    SESSION_STOPPED = "executor.session_stopped"
+    SEND_DEFERRED = "executor.send_deferred"
+
     # Supervision
     STALL_DETECTED = "supervision.stall_detected"
     NUDGE_SENT = "supervision.nudge_sent"
