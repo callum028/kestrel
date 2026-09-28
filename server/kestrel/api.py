@@ -16,6 +16,7 @@ either success or a silent miss.
 from __future__ import annotations
 
 import asyncio
+import codecs
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -105,6 +106,31 @@ class TerminalIn(BaseModel):
     task_handle: str | None = None
     rows: int = 40
     cols: int = 120
+
+
+class _TextStreamer:
+    """Incremental UTF-8 decoding for one websocket's worth of terminal output.
+
+    A PTY read can split a multibyte character across two chunks - a spinner
+    or a box-drawing glyph lands mid-sequence as often as not, and Claude
+    Code's UI is full of both. Decoding each chunk independently with
+    `errors="replace"` (the naive version) renders that boundary as a mangled
+    replacement character even though the bytes, taken together, are fine.
+    `codecs`' incremental decoder holds the dangling partial sequence between
+    calls instead of discarding it.
+    """
+
+    def __init__(self) -> None:
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+    def feed(self, chunk: bytes) -> str:
+        return self._decoder.decode(chunk)
+
+    def flush(self) -> str:
+        """Call once, when the source has ended - a trailing incomplete
+        sequence (the process died mid-write) becomes a replacement character
+        instead of silently vanishing."""
+        return self._decoder.decode(b"", final=True)
 
 
 def _tool_signature(hook: HookIn) -> str:
@@ -411,14 +437,20 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
 
         await websocket.accept()
         queue = await terminal.subscribe()
+        text = _TextStreamer()
 
         async def pump_out() -> None:
             while True:
                 chunk = await queue.get()
                 if chunk is None:
+                    trailing = text.flush()
+                    if trailing:
+                        await websocket.send_text(trailing)
                     await websocket.send_json({"type": "exit", "code": terminal.exit_code})
                     return
-                await websocket.send_text(chunk.decode("utf-8", errors="replace"))
+                decoded = text.feed(chunk)
+                if decoded:
+                    await websocket.send_text(decoded)
 
         async def pump_in() -> None:
             while True:

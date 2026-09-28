@@ -8,9 +8,20 @@ never its parent, so a server crash or redeploy cannot take a session down
 with it.
 
 Transport is a Unix domain socket in the Kestrel data directory, created
-`0600`. That is deliberately not TCP: everything here runs on one box now (the
-Pi, or WSL for dev), so there is nothing to reach over the network, and a UDS
-gets the permission bit and the "only this machine" guarantee for free.
+`0600` (bound under a restrictive umask, so there is no window where a
+default-permission socket briefly exists — this socket spawns shells). That is
+deliberately not TCP: everything here runs on one box now (the Pi, or WSL for
+dev), so there is nothing to reach over the network, and a UDS gets the
+permission bit and the "only this machine" guarantee for free.
+
+Only one host may own the socket path at a time. A stale socket file left by a
+process that was killed rather than shut down is not a sign anything is
+listening, but one left by a still-running host very much is — so starting up
+always tries to connect to whatever is already there first. A refusal
+(`ConnectionRefusedError`) means the file is stale and safe to replace; success
+means a live host holds it, and starting anyway would silently strand every
+session it holds (exactly the failure this whole design exists to prevent), so
+that is refused loudly instead.
 
 Protocol is newline-delimited JSON rather than HTTP. There is no routing,
 content negotiation, or multipart body here — one long-lived connection from
@@ -46,6 +57,13 @@ from .terminals import Terminal, TerminalManager
 logger = logging.getLogger("kestrel_agent.host")
 
 SOCKET_FILENAME = "session-host.sock"
+
+
+class SessionHostAlreadyRunning(RuntimeError):
+    """Another session host already owns this socket path. Starting anyway
+    would steal the path out from under it - its terminals would stay alive
+    but become permanently unreachable, which is the exact failure this
+    process exists to prevent."""
 
 
 def default_socket_path(data_dir: Path) -> Path:
@@ -230,15 +248,42 @@ class SessionHost:
         with contextlib.suppress(OSError):
             writer.close()
 
+    async def _already_listening(self) -> bool:
+        """Connecting is the only reliable way to tell "stale file" from "live
+        host" - the inode looks identical either way."""
+        try:
+            _, writer = await asyncio.open_unix_connection(str(self.socket_path))
+        except (ConnectionRefusedError, FileNotFoundError):
+            return False
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
+        return True
+
     async def start(self) -> None:
-        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
-        # A stale socket from a previous run (killed rather than shut down)
-        # must not block the bind - it is not a sign anything is still
-        # listening, since a live listener would still own the inode fine
-        # either way. Removing it before binding is the standard UDS dance.
-        with contextlib.suppress(FileNotFoundError):
-            self.socket_path.unlink()
-        self._server = await asyncio.start_unix_server(self._on_connect, path=str(self.socket_path))
+        # Restrictive from the moment the directory and socket exist, not
+        # after the fact - a socket that spawns shells must never have a
+        # window at default permissions, even briefly.
+        previous_umask = os.umask(0o077)
+        try:
+            self.socket_path.parent.mkdir(parents=True, exist_ok=True)
+            if self.socket_path.exists():
+                if await self._already_listening():
+                    raise SessionHostAlreadyRunning(
+                        f"session host already running at {self.socket_path}"
+                    )
+                # Stale, from a process that was killed rather than shut down
+                # cleanly. Removing it before binding is the standard UDS dance.
+                with contextlib.suppress(FileNotFoundError):
+                    self.socket_path.unlink()
+            self._server = await asyncio.start_unix_server(
+                self._on_connect, path=str(self.socket_path)
+            )
+        finally:
+            os.umask(previous_umask)
+        # Belt and braces: the umask above already made both of these
+        # restrictive, but this is cheap insurance given what the socket does.
+        os.chmod(self.socket_path.parent, 0o700)
         os.chmod(self.socket_path, 0o600)
 
     async def serve_forever(self) -> None:

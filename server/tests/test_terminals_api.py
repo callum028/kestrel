@@ -3,9 +3,28 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from kestrel.api import create_app
+from kestrel.api import _TextStreamer, create_app
 from kestrel.config import Config
 from kestrel.runtime import Runtime
+
+
+def test_a_multibyte_character_split_across_chunks_is_not_corrupted():
+    """The bug the naive per-chunk `decode(..., errors="replace")` has: a PTY
+    read can end mid-character, and Claude Code's UI is full of multibyte
+    spinner and box-drawing glyphs that would otherwise render as mangled
+    replacement characters at every chunk boundary."""
+    streamer = _TextStreamer()
+    text = "spinner: ⠋⠙⠹ done — 100%"
+    encoded = text.encode("utf-8")
+
+    # Split inside the encoded form of a multibyte character (the first
+    # braille glyph is three bytes), not at a character boundary.
+    split_at = encoded.index("⠋".encode()) + 1
+    first, second = encoded[:split_at], encoded[split_at:]
+    assert 0 < split_at < len(encoded)
+
+    assembled = streamer.feed(first) + streamer.feed(second)
+    assert assembled == text
 
 
 @pytest.fixture

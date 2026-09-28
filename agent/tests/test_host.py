@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 
-from kestrel_agent.host import SessionHost
+from kestrel_agent.host import SessionHost, SessionHostAlreadyRunning
 from kestrel_agent.host_client import SessionHostClient, SessionHostUnavailable
 
 
@@ -118,6 +118,35 @@ async def test_a_missing_host_is_a_legible_failure(tmp_path):
     orphan = SessionHostClient(tmp_path / "nothing-is-listening-here.sock")
     with pytest.raises(SessionHostUnavailable):
         await orphan.list()
+
+
+async def test_a_second_host_refuses_to_steal_a_live_socket(host, tmp_path):
+    """The failure this whole design exists to prevent, one level down: a
+    second host racing the first (a systemd restart, a stray manual run) must
+    not take the socket path while the first is still serving live sessions -
+    that would make them unreachable forever, not kill them, which is worse."""
+    client = SessionHostClient(host.socket_path)
+    terminal = await client.create(cwd=tmp_path, command=["/bin/bash", "--norc", "-i"])
+    queue = await terminal.subscribe()
+    await terminal.write(b"echo still-alive\n")
+    await drain_until(queue, b"still-alive")
+
+    challenger = SessionHost(host.socket_path)
+    with pytest.raises(SessionHostAlreadyRunning):
+        await challenger.start()
+
+    # The original host and its terminal must be completely unaffected.
+    still_reachable = SessionHostClient(host.socket_path)
+    listed = await still_reachable.list()
+    assert [t.id for t in listed] == [terminal.id]
+    assert listed[0].alive is True
+
+    await terminal.write(b"echo second-message\n")
+    more = await drain_until(queue, b"second-message")
+    assert b"second-message" in more
+
+    await client.disconnect()
+    await still_reachable.disconnect()
 
 
 async def test_a_second_client_sees_what_the_first_created(host, tmp_path):

@@ -155,7 +155,6 @@ class SessionHostClient:
 
     async def _call(self, op: str, **params: Any) -> Any:
         await self._ensure_connected()
-        assert self._writer is not None
         req_id = uuid.uuid4().hex
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._pending[req_id] = future
@@ -163,11 +162,18 @@ class SessionHostClient:
         return await future
 
     async def _send(self, payload: dict[str, Any]) -> None:
-        assert self._writer is not None
+        writer = self._writer
+        if writer is None:
+            # The connection can drop between `_ensure_connected()` returning
+            # and this running - the read loop's EOF handling races it. That
+            # is the same "session host unreachable" case as never having
+            # connected at all, not a programming error, so it is raised as
+            # one rather than an AssertionError.
+            raise SessionHostUnavailable("session host connection lost")
         line = json.dumps(payload).encode() + b"\n"
         async with self._write_lock:
-            self._writer.write(line)
-            await self._writer.drain()
+            writer.write(line)
+            await writer.drain()
 
     # --- terminal descriptors ---------------------------------------------------
 
@@ -234,7 +240,6 @@ class SessionHostClient:
 
     async def _subscribe(self, terminal: RemoteTerminal) -> asyncio.Queue[bytes | None]:
         await self._ensure_connected()
-        assert self._writer is not None
         sub_id = uuid.uuid4().hex
         queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._subscriptions[sub_id] = (terminal, queue)

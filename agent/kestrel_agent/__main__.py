@@ -13,9 +13,10 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 from pathlib import Path
 
-from .host import SessionHost, default_socket_path
+from .host import SessionHost, SessionHostAlreadyRunning, default_socket_path
 
 logger = logging.getLogger("kestrel_agent")
 
@@ -67,7 +68,13 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
     socket_path = args.socket or default_socket_path(_default_data_dir())
-    asyncio.run(_run(socket_path))
+    try:
+        asyncio.run(_run(socket_path))
+    except SessionHostAlreadyRunning as exc:
+        # A second host racing the first must lose loudly, not silently steal
+        # the socket out from under a live one and strand its sessions.
+        print(f"kestrel_agent: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

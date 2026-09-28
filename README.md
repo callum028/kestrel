@@ -47,5 +47,7 @@ the processes behind it — that is the point of the split. If the server can't 
 
 ## Status
 
-Design complete. No implementation yet. See §12 of the design for the spikes to run first — the two
+Core server (tasks, attention, memory, events), the session host, and the web terminal exist and are
+tested. Everything else in the design — executors beyond Claude Code, Notion/GitHub integration, the
+phone client, voice — is still to build. See §12 of the design for the spikes to run first; the two
 phone ones need a physical device.
