@@ -11,6 +11,7 @@ export function useKestrelData() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
+  const [thinking, setThinking] = useState(false);
   // Distinct from "loading": this is "the last poll failed", which is the
   // fact an offline state has to surface rather than just showing whatever
   // was fetched last as if it were still current.
@@ -31,11 +32,15 @@ export function useKestrelData() {
 
   const pollMessages = useCallback(async () => {
     try {
-      const fresh = await api.conversation(cursor.current);
+      const [fresh, status] = await Promise.all([
+        api.conversation(cursor.current),
+        api.conversationStatus(),
+      ]);
       if (fresh.length) {
         setMessages((prev) => [...prev, ...fresh]);
         cursor.current = fresh[fresh.length - 1].id;
       }
+      setThinking(status.thinking);
       setReachable(true);
     } catch {
       setReachable(false);
@@ -63,5 +68,5 @@ export function useKestrelData() {
     [pollMessages],
   );
 
-  return { state, tasks, deliveries, messages, reachable, refresh, sendMessage };
+  return { state, tasks, deliveries, messages, thinking, reachable, refresh, sendMessage };
 }

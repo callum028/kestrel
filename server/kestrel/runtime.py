@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -16,6 +17,8 @@ from kestrel_agent.host_client import SessionHostClient
 from .attention import AttentionState, Signals, compute
 from .board import Board, build_board
 from .board_sync import BoardSync
+from .brain.responder import BrainResponder
+from .brain.runner import BrainConfig, BrainRunner, MCPServerSpec
 from .config import Config
 from .conversation import ConversationStore, Responder
 from .db import Database, connect
@@ -59,6 +62,41 @@ def _build_mail_reader(config: Config, log: EventLog) -> MailReader:
         )
         inner = FakeMailReader()
     return RecordingMailReader(inner, log)
+
+
+def _build_brain_responder(config: Config, rt: Runtime) -> BrainResponder:
+    """The MCP server the brain's `claude -p` calls are restricted to
+    (`--tools mcp__kestrel__*`, see runner.py): by default the same
+    interpreter running this process, invoking `kestrel.brain.mcp_server` as
+    a module - which is exactly what the `kestrel-mcp` console script does,
+    just without needing it on PATH. `KESTREL_BRAIN_MCP_COMMAND` overrides
+    this for a packaged/installed deployment.
+    """
+    mcp_command = config.brain_mcp_server_command or sys.executable
+    mcp_args = (
+        config.brain_mcp_server_args
+        if config.brain_mcp_server_command
+        else ("-m", "kestrel.brain.mcp_server")
+    )
+    mcp_env = {"KESTREL_SERVER_URL": config.server_url, "KESTREL_DATA": str(config.data_dir)}
+    runner = BrainRunner(
+        BrainConfig(
+            binary=config.brain_claude_binary or "claude",
+            base_args=config.brain_claude_base_args,
+            timeout_seconds=config.brain_timeout_seconds,
+            work_dir=config.brain_work_dir,
+        )
+    )
+    return BrainResponder(
+        runner=runner,
+        identity_dir=config.identity_dir,
+        memory=rt.memory,
+        state_block=rt.state_block,
+        active_tasks=rt.tasks.active,
+        mcp_servers=[
+            MCPServerSpec(name="kestrel", command=mcp_command, args=mcp_args, env=mcp_env)
+        ],
+    )
 
 
 @dataclass
@@ -131,12 +169,13 @@ class Runtime:
             }
         executors = executors or {}
         board = board or build_board(config.board)
-        return cls(
+        memory = MemoryStore(config.memory_repo, log)
+        rt = cls(
             config=config,
             conn=conn,
             log=log,
             tasks=tasks,
-            memory=MemoryStore(config.memory_repo, log),
+            memory=memory,
             observations=ObservationStore(conn, log),
             deliveries=deliveries,
             dev_lock=dev_lock,
@@ -152,6 +191,18 @@ class Runtime:
             human_activity=human_activity,
             executors=executors,
         )
+
+        # The brain: only wired in when a caller hasn't already supplied a
+        # responder (tests mostly, and StubResponder's default is exactly
+        # what most of them want) and a binary is configured
+        # (KESTREL_BRAIN_CLAUDE_BINARY) - same backward-compatible gating as
+        # the Claude Code executor above. Built after `rt` exists because the
+        # brain needs `rt.state_block`/`rt.tasks.active`, which are Runtime's
+        # own methods.
+        if responder is None and config.brain_claude_binary:
+            rt.conversation.set_responder(_build_brain_responder(config, rt))
+
+        return rt
 
     # --- attention ----------------------------------------------------------
 

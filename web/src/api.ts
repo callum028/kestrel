@@ -132,6 +132,11 @@ export const api = {
   conversation: (after = 0) =>
     json<ConversationMessage[]>(`/conversation/messages?after=${after}&limit=200`),
 
+  // The brain step's visible "thinking" state - a reply is being generated
+  // in the background, so there is nothing new in `conversation()` yet, but
+  // the UI still has something to show for it.
+  conversationStatus: () => json<{ thinking: boolean }>("/conversation/status"),
+
   sendMessage: (text: string) =>
     json<Outcome<ConversationMessage>>("/conversation/messages", {
       method: "POST",

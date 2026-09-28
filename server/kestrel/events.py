@@ -76,6 +76,12 @@ class EventKind(StrEnum):
     # Conversation - the one Kestrel chat, shared across every device.
     CONVERSATION_MESSAGE = "conversation.message"
 
+    # Brain - the headless `claude -p` calls behind Kestrel's own replies
+    # (server/kestrel/brain/). A failed or timed-out run must never be
+    # silent, so it is always logged here even though the conversation
+    # itself still gets a template-fallback reply - see brain/narration.py.
+    BRAIN_CALL_FAILED = "brain.call_failed"
+
     # Mail - read-only, only on request. Every read is recorded here (what was
     # read, never the body), which is the audit trail for a capability whose
     # whole risk surface is "what did Kestrel look at".

@@ -250,6 +250,31 @@ class MemoryStore:
         self._log.append(EventKind.MEMORY_SUPERSEDED, "kestrel", {"old": old.id, "new": new.id})
         return new
 
+    def forget(self, entry_id: str, reason: str = "", actor: str = "callum") -> None:
+        """Explicit deletion - the `forget` tool. Distinct from `supersede`:
+        there is no replacement fact, just "this was wrong" or "no longer
+        relevant". Still git history (the file is `git rm`'d, not unlinked),
+        so the moment of deletion is itself auditable, and still an event -
+        the same visible-moment-of-creation rule applies symmetrically to
+        removal."""
+        entry = self.get(entry_id)  # raises if it does not exist
+        self._git("rm", "-q", f"{entry_id}.md")
+        self._git(
+            "-c",
+            "user.name=kestrel",
+            "-c",
+            "user.email=kestrel@local",
+            "commit",
+            "-q",
+            "-m",
+            f"forget {entry_id}: {reason[:60] or entry.fact[:60]}",
+        )
+        self._log.append(
+            EventKind.MEMORY_SUPERSEDED,
+            actor,
+            {"old": entry.id, "new": None, "forgotten": True, "reason": reason},
+        )
+
     def get(self, entry_id: str) -> MemoryEntry:
         return _parse(self._path(entry_id).read_text())
 

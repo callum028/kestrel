@@ -4,6 +4,8 @@ The tick loop is not started here - create_app's lifespan owns it, and TestClien
 is used without entering it so ticks stay explicit and time stays controllable.
 """
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -170,6 +172,18 @@ def test_acknowledging_an_unknown_delivery_says_so(client):
 
 
 # --- conversation -------------------------------------------------------
+# Replies are generated in the background (see kestrel.conversation) - the
+# TestClient's portal keeps running its event loop on its own thread, so a
+# short poll on /conversation/status (backed by real wall-clock sleeps, not
+# anything that depends on this thread's loop) is enough to wait for one out.
+
+
+def wait_for_reply(client, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while client.get("/conversation/status").json()["thinking"]:
+        if time.monotonic() > deadline:
+            raise TimeoutError("brain reply did not land in time")
+        time.sleep(0.01)
 
 
 def test_posting_a_message_stores_it_and_returns_it(client):
@@ -181,6 +195,7 @@ def test_posting_a_message_stores_it_and_returns_it(client):
 
 def test_listing_messages_includes_the_stub_reply(client):
     client.post("/conversation/messages", json={"text": "what's running?"})
+    wait_for_reply(client)
     messages = client.get("/conversation/messages").json()
     assert [m["role"] for m in messages] == ["user", "kestrel"]
     assert "brain isn't connected" in messages[1]["text"]
@@ -188,11 +203,19 @@ def test_listing_messages_includes_the_stub_reply(client):
 
 def test_listing_messages_after_a_cursor_only_returns_the_newer_ones(client):
     client.post("/conversation/messages", json={"text": "first"})
+    wait_for_reply(client)
     cursor = client.get("/conversation/messages").json()[-1]["id"]
     client.post("/conversation/messages", json={"text": "second"})
+    wait_for_reply(client)
     fresh = client.get(f"/conversation/messages?after={cursor}").json()
     assert fresh[0]["text"] == "second"
     assert [m["role"] for m in fresh] == ["user", "kestrel"]
+
+
+def test_conversation_status_reflects_the_background_reply(client):
+    client.post("/conversation/messages", json={"text": "hi"})
+    wait_for_reply(client)
+    assert client.get("/conversation/status").json() == {"thinking": False}
 
 
 # --- web push -------------------------------------------------------------

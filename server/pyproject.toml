@@ -21,6 +21,14 @@ dependencies = [
     # Both are easy to get subtly wrong by hand; this is the de facto standard
     # Python implementation of the RFC 8030/8188/8291/8292 stack.
     "pywebpush>=2.0",
+    # kestrel-mcp (kestrel.brain.mcp_server): the stdio MCP server the brain's
+    # headless `claude -p` calls talk to. Using the official SDK instead of
+    # hand-rolling JSON-RPC-over-stdio buys the framing, capability
+    # negotiation and tool-schema validation for free - the wire format is
+    # not something worth re-deriving, and the SDK is a small, dependency-
+    # light protocol library (see server/kestrel/brain/mcp_server.py for the
+    # tool definitions themselves).
+    "mcp>=1.2,<2",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +36,7 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5"]
 
 [project.scripts]
 kestrel-mail-auth = "kestrel.mail_auth:main"
+kestrel-mcp = "kestrel.brain.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]

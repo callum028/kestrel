@@ -4,6 +4,11 @@ import type { ConversationMessage } from "./api";
 interface Props {
   messages: ConversationMessage[];
   onSend: (text: string) => Promise<unknown>;
+  /** True while a reply is being generated in the background (the brain is a
+   * headless `claude -p` call, not something posting a message waits on) -
+   * see `/conversation/status`. Optional so nothing else that renders this
+   * component needs to change. */
+  thinking?: boolean;
   /** Phone home screen wants a taller, borderless thread; the desk rail wants
    * it to fit next to the deliveries feed. Same component, one layout knob. */
   compact?: boolean;
@@ -12,7 +17,7 @@ interface Props {
 // The Kestrel chat. Role is what has to stay visually distinct everywhere
 // this renders - a Kestrel line and a user line never share an alignment or
 // a background, so "whose words are these" never depends on reading them.
-export function ConversationPane({ messages, onSend, compact = false }: Props) {
+export function ConversationPane({ messages, onSend, thinking = false, compact = false }: Props) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
@@ -49,6 +54,11 @@ export function ConversationPane({ messages, onSend, compact = false }: Props) {
               ))}
             </div>
           ))
+        )}
+        {thinking && (
+          <div className="bubble kestrel thinking" aria-live="polite">
+            <div className="bubble-text">Kestrel's thinking…</div>
+          </div>
         )}
         <div ref={bottom} />
       </div>
