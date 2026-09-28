@@ -77,11 +77,21 @@ class Terminal:
             queue.put_nowait(data)
 
     def subscribe(self) -> asyncio.Queue[bytes | None]:
-        """Scrollback first, then live output. None marks the process exiting."""
+        """Scrollback first, then live output. None marks the process exiting.
+
+        A short-lived process can exit (self.alive goes False) before the
+        reader has ever run - the PTY read is driven by the event loop, which
+        only turns over on the next await, while the child process runs
+        concurrently on the OS scheduler. So "has it exited" is not "is
+        there anything left to read": bytes can still be sitting unread in
+        the kernel's PTY buffer. Gate the exit sentinel on _exited, which is
+        only set once the reader has seen a real EOF (an empty read), i.e.
+        once everything has actually been drained into scrollback.
+        """
         queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         if self._scrollback:
             queue.put_nowait(self.scrollback())
-        if not self.alive:
+        if self._exited.is_set():
             queue.put_nowait(None)
         self._subscribers.add(queue)
         return queue
