@@ -303,6 +303,59 @@ async def test_symbol_exists_checks_the_worktrees_tracked_content(live):
     assert await executor.symbol_exists(task, "LEGACY_SYNC_FLAG_NOBODY_WROTE") is False
 
 
+async def test_prepare_validation_checks_out_the_merge_commit(live, tmp_path):
+    rt, executor = live
+    task = rt.tasks.create("KES-17", "Fix the bug", ["tests pass"], "claude_code", scope="proj")
+    await executor.start(task, brief="brief")
+    worktree = tmp_path / "worktrees" / "KES-17"
+    repo = tmp_path / "repo"
+    # `prepare_validation` fetches "origin" before checking out - a real
+    # deployment always has one (that's where the merged PR lives); here the
+    # worktree's own originating repo stands in for it.
+    _git("remote", "add", "origin", str(repo), cwd=worktree)
+    _git("commit", "--allow-empty", "-m", "merge commit", cwd=repo)
+    merge_sha = _git("rev-parse", "HEAD", cwd=repo).stdout.strip()
+
+    worktree = await executor.prepare_validation(task, merge_sha)
+
+    assert worktree == tmp_path / "worktrees" / "KES-17"
+    assert _git("rev-parse", "HEAD", cwd=worktree).stdout.strip() == merge_sha
+    # Detached: the worktree has no branch checked out, which is exactly the
+    # state a validation failure must not leave a reopened session in.
+    with pytest.raises(subprocess.CalledProcessError):
+        _git("symbolic-ref", "-q", "HEAD", cwd=worktree)
+
+
+async def test_rebranch_for_fix_moves_the_worktree_off_detached_head(live, tmp_path):
+    rt, executor = live
+    task = rt.tasks.create("KES-18", "Fix the bug", ["tests pass"], "claude_code", scope="proj")
+    await executor.start(task, brief="brief")
+    worktree = tmp_path / "worktrees" / "KES-18"
+    repo = tmp_path / "repo"
+    _git("remote", "add", "origin", str(repo), cwd=worktree)
+    _git("commit", "--allow-empty", "-m", "merge commit", cwd=repo)
+    merge_sha = _git("rev-parse", "HEAD", cwd=repo).stdout.strip()
+    worktree = await executor.prepare_validation(task, merge_sha)
+
+    branch = await executor.rebranch_for_fix(task, merge_sha)
+
+    assert branch == "kestrel/KES-18-fix-1"
+    assert _git("branch", "--show-current", cwd=worktree).stdout.strip() == branch
+    assert _git("rev-parse", "HEAD", cwd=worktree).stdout.strip() == merge_sha
+
+    # A second failure on the same task does not collide with the first fix
+    # branch - it counts up instead.
+    branch2 = await executor.rebranch_for_fix(task, merge_sha)
+    assert branch2 == "kestrel/KES-18-fix-2"
+
+
+async def test_rebranch_for_fix_is_none_without_a_worktree(live):
+    rt, executor = live
+    task = rt.tasks.create("KES-19", "Fix the bug", ["tests pass"], "claude_code", scope="proj")
+    # Never started - no worktree exists yet.
+    assert await executor.rebranch_for_fix(task, "deadbeef") is None
+
+
 async def test_alive_is_none_for_a_task_the_executor_has_never_started(live):
     rt, executor = live
     task = rt.tasks.create("KES-15", "Fix the bug", ["tests pass"], "claude_code", scope="proj")

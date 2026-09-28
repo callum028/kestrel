@@ -738,6 +738,7 @@ class Orchestrator:
             report,
             reason=f"validation failed: {outcome.summary}",
             message=evidence,
+            merge_sha=merge_sha,
         )
 
     async def _deploy_status(self, deploy: DeployCheck, merge_sha: str) -> str:
@@ -790,12 +791,20 @@ class Orchestrator:
         report: TickReport,
         reason: str,
         message: str,
+        merge_sha: str | None = None,
     ) -> None:
         """Every exit from validation releases the lock first - pass, fail,
         timeout, or a crash in this method's own caller. A session still
         alive gets the evidence and goes back to `RUNNING` to fix forward
         (design §5: "it does not revert"); a session that is gone gets
-        parked, same as any other stall with nobody left to nudge."""
+        parked, same as any other stall with nobody left to nudge.
+
+        `merge_sha` is given only by the validation-failure call site, whose
+        worktree `prepare_validation` left checked out at that commit in
+        detached HEAD - reopening onto a fresh branch there
+        (`rebranch_for_fix`) is what lets Claude open a follow-up PR
+        normally, rather than continuing to work with nothing to push to.
+        """
         self._dev_lock.release(task.id)
         executor = self._executors.get(task.executor)
         alive: bool | None = None
@@ -819,6 +828,15 @@ class Orchestrator:
             )
             report.parked.append(task.handle)
             return
+
+        if merge_sha is not None:
+            rebranch = getattr(executor, "rebranch_for_fix", None)
+            new_branch = await rebranch(task, merge_sha) if rebranch else None
+            if new_branch:
+                message = (
+                    f"{message}\n\nYour worktree is now on a fresh branch, {new_branch}, "
+                    f"cut from the merge commit - open a follow-up PR from there."
+                )
 
         self._tasks.transition(task.id, TaskState.RUNNING, reason=reason)
         outcome = await executor.send(task, message)

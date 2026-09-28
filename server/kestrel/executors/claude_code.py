@@ -308,6 +308,29 @@ class ClaudeCodeExecutor:
             return None
         return worktree
 
+    async def rebranch_for_fix(self, task: Task, merge_sha: str) -> str | None:
+        """After a failed validation, moves the worktree off the detached
+        `merge_sha` HEAD that `prepare_validation` left it on and onto a
+        fresh branch cut from that same commit - `kestrel/<handle>-fix-<n>`,
+        `n` counting up per task so a task that fails validation more than
+        once does not collide with its own earlier fix branch. Without this,
+        a session sent back to `RUNNING` after a validation failure is left
+        in detached HEAD, where `git push`/opening a follow-up PR does not
+        work the normal way. `None` when there is no worktree to rebranch
+        (mirrors `prepare_validation`'s own contract) or the checkout fails.
+        """
+        try:
+            worktree = self._worktree_for(task)
+        except NoProjectConfigured:
+            return None
+        if not worktree.exists():
+            return None
+        branch = await asyncio.to_thread(_next_fix_branch, worktree, task.handle)
+        result = await asyncio.to_thread(_git, "checkout", "-B", branch, merge_sha, cwd=worktree)
+        if result.returncode != 0:
+            return None
+        return branch
+
     async def symbol_exists(self, task: Task, symbol: str) -> bool:
         """Whether `symbol` appears anywhere in the worktree's tracked
         content right now - what a stated blocker is checked against before
@@ -323,6 +346,20 @@ class ClaudeCodeExecutor:
 
 def _git(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
+
+
+def _next_fix_branch(worktree: Path, handle: str) -> str:
+    """The next unused `kestrel/<handle>-fix-<n>` name, `n` starting at 1 -
+    scanned off the worktree's own local branches so this stays correct
+    across restarts with no state of its own to keep in sync."""
+    prefix = f"kestrel/{handle}-fix-"
+    refs = _git("for-each-ref", "--format=%(refname:short)", "refs/heads/", cwd=worktree)
+    numbers = [
+        int(name[len(prefix) :])
+        for name in refs.stdout.splitlines()
+        if name.startswith(prefix) and name[len(prefix) :].isdigit()
+    ]
+    return f"{prefix}{max(numbers, default=0) + 1}"
 
 
 def _worktree_diff_hash(worktree: Path) -> str:

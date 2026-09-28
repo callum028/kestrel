@@ -56,6 +56,8 @@ class FakeClaude:
         self.worktree = worktree
         self._project = project
         self.refuse_send: str | None = None
+        self.rebranched: list[tuple[str, str]] = []
+        self.rebranch_result: str | None = "kestrel/KES-40-fix-1"
 
     async def start(self, task, brief):
         pass
@@ -78,6 +80,10 @@ class FakeClaude:
     async def prepare_validation(self, task, merge_sha):
         self.prepared.append((task.handle, merge_sha))
         return self.worktree
+
+    async def rebranch_for_fix(self, task, merge_sha):
+        self.rebranched.append((task.handle, merge_sha))
+        return self.rebranch_result
 
 
 @dataclass
@@ -316,6 +322,11 @@ async def test_validation_failure_reopens_with_evidence_and_releases_the_lock(
     assert handle == "KES-40"
     assert "checkout > pays with card" in message
     assert "timeout waiting for selector" in message
+    assert "kestrel/KES-40-fix-1" in message
+
+    # The worktree was moved off the detached merge commit onto the fresh
+    # branch, not left there - that's the whole point of the rebranch.
+    assert claude.rebranched == [("KES-40", sha)]
 
 
 async def test_validation_failure_with_session_gone_parks_instead(
@@ -338,6 +349,31 @@ async def test_validation_failure_with_session_gone_parks_instead(
     assert tasks.get(t.id).state is TaskState.PARKED
     assert lock.holder() is None
     assert claude.stopped == ["KES-40"]
+
+
+async def test_validation_failure_reopen_survives_a_failed_rebranch(
+    tasks, log, conn, github, tmp_path
+):
+    """The rebranch is best-effort - a failed `git checkout -B` must not stop
+    the evidence reaching Claude, it just means the message stays without the
+    fresh-branch pointer."""
+    claude = FakeClaude(project="repo", worktree=tmp_path)
+    claude.rebranch_result = None
+    t, sha = _validating_task(tasks, log, github)
+    lock = DevLock(conn)
+    lock.acquire(t.id, NIGHT)
+    github.workflow_runs[("deploy.yml", sha)] = CIStatus(CIState.SUCCESS, "deployed")
+    runner = FakeValidationRunner(result=RunOutcome(ok=False, summary="1 test(s) failed"))
+    orc = make_orchestrator(
+        tasks, log, conn, claude, github, validation={"repo": _project_validation()}, runner=runner
+    )
+
+    report = await orc.tick(NIGHT, ASLEEP)
+
+    assert report.reopened == ["KES-40"]
+    assert claude.rebranched == [("KES-40", sha)]
+    _handle, message = claude.sent[-1]
+    assert "fresh branch" not in message
 
 
 async def test_validation_pass_flags_unrequested_spec_changes(tasks, log, conn, github, tmp_path):
