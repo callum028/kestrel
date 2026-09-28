@@ -4,8 +4,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kestrel.api import _TextStreamer, create_app
+from kestrel.auth import parse_allowed_origins
 from kestrel.config import Config
 from kestrel.runtime import Runtime
+
+TAILNET_ORIGIN = "https://kestrel-pi.tailnet-1234.ts.net"
 
 
 def test_a_multibyte_character_split_across_chunks_is_not_corrupted():
@@ -183,3 +186,50 @@ def test_a_socket_without_a_token_carries_no_keystrokes(client, tmp_path):
     ):
         with pytest.raises(Exception), client.websocket_connect(url) as ws:  # noqa: B017
             ws.receive_text()
+
+
+@pytest.fixture
+def tailnet_client(tmp_path, session_host):
+    """Same as `client`, but with `KESTREL_ALLOWED_ORIGINS`'s effect
+    (`Config.allowed_origins`) configured for a tailnet URL - what the
+    websocket origin check actually has to accept once the app is reachable
+    behind `tailscale serve` rather than only from the dev/Tauri origins."""
+    config = Config(
+        data_dir=tmp_path,
+        db_path=tmp_path / "kestrel.db",
+        memory_repo=tmp_path / "memory",
+        identity_dir=tmp_path / "identity",
+        allowed_origins=parse_allowed_origins(TAILNET_ORIGIN),
+    )
+    rt = Runtime.build(config)
+    app = create_app(runtime=rt)
+    with TestClient(app, headers={"Authorization": f"Bearer {app.state.token}"}) as c:
+        c.token = app.state.token  # type: ignore[attr-defined]
+        yield c
+
+
+def test_a_websocket_from_the_configured_extra_origin_is_accepted(tailnet_client, tmp_path):
+    opened = tailnet_client.post(
+        "/terminals", json={"cwd": str(tmp_path), "command": ["/bin/bash", "--norc", "-i"]}
+    ).json()
+
+    with tailnet_client.websocket_connect(
+        ws_url(tailnet_client, opened["id"]), headers={"Origin": TAILNET_ORIGIN}
+    ) as ws:
+        ws.send_json({"type": "input", "data": "echo tailnet-origin\n"})
+        assert "tailnet-origin" in read_until(ws, "tailnet-origin")
+
+
+def test_a_websocket_from_an_unconfigured_origin_is_still_refused(tailnet_client, tmp_path):
+    opened = tailnet_client.post(
+        "/terminals", json={"cwd": str(tmp_path), "command": ["/bin/bash", "--norc", "-i"]}
+    ).json()
+
+    # starlette raises on the 4401 close rather than yielding a socket
+    with (
+        pytest.raises(Exception),  # noqa: B017
+        tailnet_client.websocket_connect(
+            ws_url(tailnet_client, opened["id"]), headers={"Origin": "https://evil.example.com"}
+        ) as ws,
+    ):
+        ws.receive_text()

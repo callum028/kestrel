@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, hasToken, type TerminalInfo } from "./api";
+import {
+  api,
+  clearToken,
+  hasToken,
+  setOnTokenRejected,
+  setToken,
+  type TerminalInfo,
+  validateToken,
+} from "./api";
 import { ConversationPane } from "./ConversationPane";
 import { PhoneWorkspace } from "./PhoneWorkspace";
 import { PushToggle } from "./PushToggle";
@@ -29,14 +37,105 @@ function useDeepLinkedDelivery(): string | null {
   return id;
 }
 
+/** The one-time pairing fragment a `kestrel-pair` link carries -
+ * `#pair=<token>` - read once on load, never left sitting in the address bar
+ * (see docs/design.md §11a on why the token lives in a fragment: it never
+ * reaches an HTTP request, so pulling it out of `location.hash` client-side
+ * is the only place it is ever visible at all). */
+function readPairingFragment(): string | null {
+  const hash = location.hash;
+  const prefix = "#pair=";
+  if (!hash.startsWith(prefix)) return null;
+  return decodeURIComponent(hash.slice(prefix.length));
+}
+
+type AuthPhase = "checking" | "authed" | "unauthed";
+
+/** The token gate: resolves a `#pair=` fragment (if present) against the
+ * server *before* trusting it, strips it from the URL regardless of outcome,
+ * and re-opens the gate on any later 401/403 (a stored token the server no
+ * longer accepts, e.g. after a rotation - `api.ts`'s `onTokenRejected`) so
+ * that always reads as "go pair again", never a silent, permanent failure. */
+function useAuthPhase() {
+  const [phase, setPhase] = useState<AuthPhase>(() =>
+    readPairingFragment() ? "checking" : hasToken() ? "authed" : "unauthed",
+  );
+  const [pairError, setPairError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setOnTokenRejected(() => setPhase("unauthed"));
+    return () => setOnTokenRejected(null);
+  }, []);
+
+  useEffect(() => {
+    const candidate = readPairingFragment();
+    if (!candidate) return;
+    // Stripped immediately, before validation resolves - a failed pairing
+    // attempt must not leave the token sitting in browser history either.
+    window.history.replaceState(null, "", location.pathname + location.search);
+    validateToken(candidate).then((ok) => {
+      if (ok) {
+        setToken(candidate);
+        setPairError(null);
+        setPhase("authed");
+      } else {
+        setPairError("That pairing link was rejected - it may be stale. Ask for a fresh one.");
+        setPhase("unauthed");
+      }
+    });
+  }, []);
+
+  const submitToken = useCallback(async (candidate: string) => {
+    setPhase("checking");
+    const ok = await validateToken(candidate);
+    if (ok) {
+      setToken(candidate);
+      setPairError(null);
+      setPhase("authed");
+    } else {
+      setPairError("That token was rejected.");
+      setPhase("unauthed");
+    }
+  }, []);
+
+  const unpair = useCallback(() => {
+    clearToken();
+    setPhase("unauthed");
+  }, []);
+
+  return { phase, pairError, submitToken, unpair };
+}
+
 export default function App() {
   // The token check has to happen *outside* the component holding the hooks.
   // An early return inside it does not stop effects - React still runs them -
   // so a tokenless window sat there issuing a 401 every three seconds.
-  return hasToken ? <Shell /> : <NoToken />;
+  const { phase, pairError, submitToken, unpair } = useAuthPhase();
+  if (phase === "checking") return <Pairing />;
+  return phase === "authed" ? <Shell onUnpair={unpair} /> : <NoToken error={pairError} onSubmit={submitToken} />;
 }
 
-function NoToken() {
+function Pairing() {
+  return (
+    <div className="app">
+      <header className="topbar">
+        <span className="brand">Kestrel</span>
+      </header>
+      <div className="placeholder">
+        <p>Pairing this device…</p>
+      </div>
+    </div>
+  );
+}
+
+function NoToken({
+  error,
+  onSubmit,
+}: {
+  error: string | null;
+  onSubmit: (token: string) => void;
+}) {
+  const [pasted, setPasted] = useState("");
   return (
     <div className="app">
       <header className="topbar">
@@ -44,16 +143,35 @@ function NoToken() {
       </header>
       <div className="placeholder">
         <div style={{ maxWidth: 520, textAlign: "left", lineHeight: 1.6 }}>
-          <p style={{ color: "var(--warn)", marginTop: 0 }}>No API token found.</p>
+          <p style={{ color: "var(--warn)", marginTop: 0 }}>
+            {error ?? "This device isn't paired with Kestrel yet."}
+          </p>
           <p>
-            The server writes one to <code>~/.kestrel/token</code> on first start. This app looks
-            in <code>KESTREL_TOKEN</code>, then <code>KESTREL_TOKEN_FILE</code>, then{" "}
-            <code>%USERPROFILE%\.kestrel\token</code>, then each WSL distro's home directory.
+            On the machine running the server: <code>kestrel-pair</code> (or{" "}
+            <code>python -m kestrel.pair</code>) prints a one-time link. Open it on this device to
+            pair it - the token is never baked into the app itself, so this is the only way in.
           </p>
           <p style={{ color: "var(--text-faint)" }}>
-            Start the server and reopen. If it runs in WSL under a different user, set{" "}
-            <code>KESTREL_WSL_USER</code>.
+            No link handy? Paste a token directly instead:
           </p>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (pasted.trim()) onSubmit(pasted.trim());
+            }}
+            style={{ display: "flex", gap: 8 }}
+          >
+            <input
+              type="password"
+              value={pasted}
+              onChange={(e) => setPasted(e.target.value)}
+              placeholder="paste token"
+              style={{ flex: 1 }}
+            />
+            <button type="submit" disabled={!pasted.trim()}>
+              Pair
+            </button>
+          </form>
         </div>
       </div>
     </div>
@@ -68,13 +186,41 @@ function OfflineBanner({ reachable }: { reachable: boolean }) {
   return <div className="offline-banner">Can't reach Kestrel. Retrying…</div>;
 }
 
-function Shell() {
+function UnpairControl({ onUnpair }: { onUnpair: () => void }) {
+  // Deliberately unobtrusive - unpairing is rare and destructive enough
+  // (this device stops being able to reach Kestrel at all until paired
+  // again) that it shouldn't sit next to anything reached in normal use.
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (window.confirm("Unpair this device? You'll need a new pairing link to use it again.")) {
+          onUnpair();
+        }
+      }}
+      title="Unpair this device"
+      style={{
+        position: "fixed",
+        bottom: 8,
+        right: 8,
+        opacity: 0.4,
+        fontSize: 11,
+        zIndex: 100,
+      }}
+    >
+      Unpair
+    </button>
+  );
+}
+
+function Shell({ onUnpair }: { onUnpair: () => void }) {
   const isPhone = useMediaQuery(PHONE_QUERY);
   const data = useKestrelData();
   const focusDeliveryId = useDeepLinkedDelivery();
 
   return (
     <>
+      <UnpairControl onUnpair={onUnpair} />
       <OfflineBanner reachable={data.reachable} />
       {isPhone ? (
         <PhoneWorkspace

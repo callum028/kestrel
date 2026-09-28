@@ -7,8 +7,16 @@ from pathlib import Path
 
 from kestrel_agent.host import default_socket_path
 
+from .auth import DEFAULT_ALLOWED_ORIGINS, parse_allowed_origins
 from .board import NOTION_API_VERSION
 from .validation import DeployCheck, ProjectValidation, ValidationCommand
+
+# server/kestrel/config.py -> kestrel/ -> server/ -> repo root. Works for both
+# the dev checkout and a deploy.sh release (a `git worktree`, so this is
+# still a real repo root, just under releases/<tag>/) because the package is
+# always installed editable (`-e server`) - `__file__` points at the source
+# tree, never into site-packages.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True)
@@ -110,6 +118,16 @@ def _build_validation(project_names: list[str]) -> dict[str, ProjectValidation]:
     return validation
 
 
+def _parse_args(raw: str | None) -> tuple[str, ...]:
+    """Shell-style splitting (`shlex`), so `KESTREL_BRAIN_BASE_ARGS` and
+    `KESTREL_BRAIN_MCP_ARGS` read the same way a systemd unit's `ExecStart`
+    line does - `--flag "quoted value"` - rather than needing a delimiter
+    that can never appear in an argument."""
+    import shlex
+
+    return tuple(shlex.split(raw)) if raw else ()
+
+
 def _parse_projects(raw: str | None) -> dict[str, Path]:
     """`name=path,name2=path2` - deliberately not JSON, so it is one
     comfortable line in a systemd unit or a `.env` file rather than a quoted
@@ -152,6 +170,19 @@ class Config:
     claude_base_args: tuple[str, ...] = ("--dangerously-skip-permissions",)
     server_url: str = DEFAULT_SERVER_URL
 
+    # CORS/origin allowlist (auth.py): the dev/Tauri defaults, plus whatever
+    # `KESTREL_ALLOWED_ORIGINS` adds - typically the one tailnet URL
+    # `tailscale serve` fronts the app at. Always additive - see
+    # `auth.parse_allowed_origins`.
+    allowed_origins: frozenset[str] = field(default_factory=lambda: DEFAULT_ALLOWED_ORIGINS)
+
+    # The built web app (`web/dist`, from `npm run build`) that the server
+    # serves at `/` so a phone browser can install it as a PWA straight from
+    # the tailnet URL - see `web_static.py`. `None` (nothing built, e.g. most
+    # test runs and plain dev-with-vite) means the server answers API routes
+    # only, exactly as before this existed.
+    web_dist_dir: Path | None = None
+
     # GitHub (github.py): PR discovery, CI status for waits, merge-on-green.
     # Token from the environment only (never config), same as the Notion
     # token - `GH_TOKEN` is what `gh auth token` and most CI runners already
@@ -169,6 +200,10 @@ class Config:
     brain_claude_binary: str | None = None
     brain_claude_base_args: tuple[str, ...] = ()
     brain_timeout_seconds: float = 60.0
+    # The `--model` alias/name `brain/routing.decide_model` hands the CLI for
+    # each tier - see `KESTREL_BRAIN_HAIKU_MODEL`/`KESTREL_BRAIN_SONNET_MODEL`
+    # below. Defaults match the CLI's own built-in aliases, so an unset
+    # deployment behaves exactly as before this was configurable.
     brain_haiku_model: str = "haiku"
     brain_sonnet_model: str = "sonnet"
     brain_mcp_server_command: str | None = None
@@ -228,11 +263,21 @@ class Config:
             claude_worktrees_root=Path(worktrees_root).expanduser() if worktrees_root else None,
             claude_binary=os.environ.get("KESTREL_CLAUDE_BINARY", "claude"),
             server_url=os.environ.get("KESTREL_SERVER_URL", DEFAULT_SERVER_URL),
+            allowed_origins=parse_allowed_origins(os.environ.get("KESTREL_ALLOWED_ORIGINS")),
+            web_dist_dir=(
+                Path(os.environ.get("KESTREL_WEB_DIST")).expanduser()
+                if os.environ.get("KESTREL_WEB_DIST")
+                else _REPO_ROOT / "web" / "dist"
+            ),
             github_token=os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"),
             github_repo=os.environ.get("KESTREL_GITHUB_REPO"),
             brain_claude_binary=os.environ.get("KESTREL_BRAIN_CLAUDE_BINARY"),
+            brain_claude_base_args=_parse_args(os.environ.get("KESTREL_BRAIN_BASE_ARGS")),
             brain_timeout_seconds=float(os.environ.get("KESTREL_BRAIN_TIMEOUT_SECONDS", "60")),
+            brain_haiku_model=os.environ.get("KESTREL_BRAIN_HAIKU_MODEL", "haiku"),
+            brain_sonnet_model=os.environ.get("KESTREL_BRAIN_SONNET_MODEL", "sonnet"),
             brain_mcp_server_command=os.environ.get("KESTREL_BRAIN_MCP_COMMAND"),
+            brain_mcp_server_args=_parse_args(os.environ.get("KESTREL_BRAIN_MCP_ARGS")),
             validation=_build_validation(list(claude_projects)),
         )
 

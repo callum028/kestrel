@@ -132,6 +132,39 @@ not part of this step.
 To stop serving: `sudo tailscale serve --https=443 off` (see `tailscale serve
 status` for the exact port/path it's currently bound to).
 
+Once this is up, the server answers at an HTTPS URL like
+`https://kestrel-pi.<tailnet>.ts.net` - the same one `tailscale serve status`
+prints. Two things this changes that a plain loopback dev setup doesn't need:
+
+1. **Add it to the origin allowlist.** The web app is now loaded from that
+   origin instead of `localhost:5173`/`tauri://localhost`, so it has to be on
+   the allowlist or every request 403s (`docs/design.md` §11a - an
+   unrecognised `Origin` is refused on purpose). Set, in `kestrel.env`:
+
+   ```sh
+   KESTREL_ALLOWED_ORIGINS=https://kestrel-pi.<tailnet>.ts.net
+   ```
+
+   and restart `kestrel-server.service`. This is additive to the built-in
+   dev/Tauri set, never a replacement for it.
+
+2. **Pair each device.** `web/dist` is served by the server itself
+   (`server/kestrel/web_static.py`) at this same URL, so the app is
+   installable as a PWA straight from it - but the API token can't be baked
+   into that bundle (design §11a) and a phone has no shell to inject one. Run,
+   on the Pi:
+
+   ```sh
+   kestrel-pair --base https://kestrel-pi.<tailnet>.ts.net
+   ```
+
+   (or set `KESTREL_PUBLIC_URL` in `kestrel.env` and drop `--base`). It prints
+   a one-time link with the token in the URL *fragment* - never sent to the
+   server or logged - to open once on each device you're pairing. Open it,
+   let the app validate and store the token, then use your browser's "install
+   app" / "add to home screen" for the PWA. A device can be un-paired later
+   from its own app menu; re-pairing is just running the command again.
+
 ## "Can't reach Kestrel"
 
 What a client should show when it can't reach the API, and what it usually
@@ -141,7 +174,7 @@ means:
 |---|---|
 | Connection refused / timeout over the tailnet | Pi is off, or Tailscale is down on the Pi or the client. Check `tailscale status` on both ends. |
 | TLS error on the tailnet URL | `tailscale serve` isn't running / was reconfigured. `sudo tailscale serve status` on the Pi. |
-| 401 from `/health` or anything else | Token mismatch - client has a stale token from before a restore/rotation. Re-read `~/.kestrel/token` into the client. |
+| 401 from `/health` or anything else | Token mismatch - client has a stale token from before a restore/rotation. The web app sends itself back to the pairing screen on this automatically (`web/src/App.tsx`); re-pair it with a fresh `kestrel-pair` link. |
 | Reachable, `/health` returns `dev_lock` non-null indefinitely, tasks not progressing | Server is up but something's stuck - check `journalctl --user -u kestrel-server`, not a connectivity problem. |
 | `/terminals` endpoints report `"status": "unavailable"` | Server is up but the session host isn't. `systemctl --user status kestrel-session-host.service`. The server itself is fine - this is the degraded mode it's designed to report rather than crash into. |
 

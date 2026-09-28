@@ -18,7 +18,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from .context_assembly import load_identity
-from .routing import Turn, decide_model
+from .routing import DEFAULT_MODEL_NAMES, ModelNames, Turn, decide_model
 from .runner import BrainError, BrainRunner
 
 
@@ -71,6 +71,7 @@ async def narrate(
     runner: BrainRunner,
     identity_dir: Path,
     log_failure: object | None = None,
+    models: ModelNames = DEFAULT_MODEL_NAMES,
 ) -> str:
     """`log_failure`, when given, is called with the exception on a brain
     failure - kept a plain optional callable rather than importing
@@ -78,7 +79,7 @@ async def narrate(
     shape (narration.py is usable standalone, e.g. from a script)."""
     try:
         identity = load_identity(identity_dir)
-        model = decide_model(Turn(text=" ".join(request.facts)))
+        model = decide_model(Turn(text=" ".join(request.facts)), models)
         result = await runner.run(
             system_prompt=f"{identity.text}\n\n## Voice\n{identity.examples}",
             user_message=_prompt(request),
