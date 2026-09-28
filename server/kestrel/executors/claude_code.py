@@ -120,6 +120,16 @@ class ClaudeCodeExecutor:
         repo_path = self.config.projects[project]
         return ensure_worktree(repo_path, self.config.worktrees_root, task.handle)
 
+    def project_for(self, task: Task) -> str | None:
+        """Public, non-raising sibling of `_project_for` - what the
+        orchestrator's validation pass and its same-repo rebase notice use to
+        group tasks by project without needing to know this executor's
+        internals or catch its exception."""
+        try:
+            return self._project_for(task)
+        except NoProjectConfigured:
+            return None
+
     # --- Executor protocol -----------------------------------------------------
 
     async def start(self, task: Task, brief: str) -> None:
@@ -269,6 +279,34 @@ class ClaudeCodeExecutor:
         if not worktree.exists():
             return Diff(added=[], removed=[], files=[])
         return await asyncio.to_thread(_worktree_diff, worktree)
+
+    async def prepare_validation(self, task: Task, merge_sha: str) -> Path | None:
+        """Updates the task's own worktree to the merge commit, for
+        validation to run against.
+
+        Decision: reuse the task's worktree rather than a dedicated
+        validation checkout. It already exists, already has the repo cloned
+        and any project-local setup (node_modules etc. are per-worktree
+        anyway once installed), and the session inside it has nothing left to
+        do at this point - the PR is merged - so overwriting its working tree
+        with `checkout --force` costs nothing real. The dev lock already
+        guarantees only one task is ever validating at a time, so there is no
+        concurrent use of this worktree to protect against. `None` when there
+        is no worktree to update (no project, or it was never created).
+        """
+        try:
+            worktree = self._worktree_for(task)
+        except NoProjectConfigured:
+            return None
+        if not worktree.exists():
+            return None
+        fetch = await asyncio.to_thread(_git, "fetch", "origin", cwd=worktree)
+        if fetch.returncode != 0:
+            return None
+        checkout = await asyncio.to_thread(_git, "checkout", "--force", merge_sha, cwd=worktree)
+        if checkout.returncode != 0:
+            return None
+        return worktree
 
     async def symbol_exists(self, task: Task, symbol: str) -> bool:
         """Whether `symbol` appears anywhere in the worktree's tracked

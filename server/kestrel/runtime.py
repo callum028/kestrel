@@ -203,6 +203,7 @@ class Runtime:
                 waits=waits,
                 github=github,
                 board_sync=board_sync,
+                validation=config.validation,
             ),
             terminals=terminals,
             mail=_build_mail_reader(config, log),

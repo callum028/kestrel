@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 
 from kestrel_agent.host import default_socket_path
 
 from .board import NOTION_API_VERSION
+from .validation import DeployCheck, ProjectValidation, ValidationCommand
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,60 @@ class BoardConfig:
 
 
 DEFAULT_SERVER_URL = "http://127.0.0.1:8099"
+
+
+def _validation_for_project(name: str) -> ProjectValidation | None:
+    """Per-project validation config, entirely from the environment -
+    `KESTREL_VALIDATION_<PROJECT>_*`, `<PROJECT>` being the same name used in
+    `KESTREL_CLAUDE_PROJECTS` upper-cased. `None` when nothing at all is set
+    for this project, which is exactly the "no validation configured" case
+    (design §5 step 7d) - a visible pass-through, not silence, is produced
+    downstream in the orchestrator, not here.
+    """
+    prefix = f"KESTREL_VALIDATION_{name.upper()}_"
+
+    def _get(suffix: str) -> str | None:
+        return os.environ.get(prefix + suffix) or None
+
+    def _minutes(suffix: str, default: float) -> timedelta:
+        raw = _get(suffix)
+        return timedelta(minutes=float(raw)) if raw else timedelta(minutes=default)
+
+    workflow = _get("DEPLOY_WORKFLOW")
+    deploy_url = _get("DEPLOY_URL")
+    command = _get("COMMAND")
+    report_path = _get("REPORT_PATH")
+
+    if not (workflow or deploy_url or command):
+        return None
+
+    return ProjectValidation(
+        deploy=DeployCheck(
+            workflow=workflow,
+            url=deploy_url,
+            url_match=_get("DEPLOY_URL_MATCH"),
+            timeout=_minutes("DEPLOY_TIMEOUT_MINUTES", 15.0),
+        ),
+        command=(
+            ValidationCommand(
+                command=command,
+                report_path=report_path or "report.json",
+                timeout=_minutes("TIMEOUT_MINUTES", 20.0),
+            )
+            if command
+            else None
+        ),
+        dev_url=_get("DEV_URL"),
+    )
+
+
+def _build_validation(project_names: list[str]) -> dict[str, ProjectValidation]:
+    validation: dict[str, ProjectValidation] = {}
+    for name in project_names:
+        config = _validation_for_project(name)
+        if config is not None:
+            validation[name] = config
+    return validation
 
 
 def _parse_projects(raw: str | None) -> dict[str, Path]:
@@ -124,6 +180,13 @@ class Config:
         # brain/runner.py's BrainConfig.work_dir.
         return self.data_dir / "brain-workdir"
 
+    # Validation (validation.py): per-project deploy confirmation and the
+    # authoritative test command, keyed by the same project name as
+    # `claude_projects`. Empty by default, same reasoning as `claude_projects`
+    # - a project absent here gets the explicit "no validation configured"
+    # pass-through rather than an error.
+    validation: dict[str, ProjectValidation] = field(default_factory=dict)
+
     @property
     def token_path(self) -> Path:
         return self.data_dir / "token"
@@ -152,6 +215,7 @@ class Config:
     def from_env(cls) -> Config:
         root = Path(os.environ.get("KESTREL_DATA", str(Path.home() / ".kestrel")))
         worktrees_root = os.environ.get("KESTREL_WORKTREES_ROOT")
+        claude_projects = _parse_projects(os.environ.get("KESTREL_CLAUDE_PROJECTS"))
         return cls(
             data_dir=root,
             db_path=root / "kestrel.db",
@@ -160,7 +224,7 @@ class Config:
             mail_tenant_id=os.environ.get("KESTREL_MAIL_TENANT_ID"),
             mail_client_id=os.environ.get("KESTREL_MAIL_CLIENT_ID"),
             board=BoardConfig.from_env(),
-            claude_projects=_parse_projects(os.environ.get("KESTREL_CLAUDE_PROJECTS")),
+            claude_projects=claude_projects,
             claude_worktrees_root=Path(worktrees_root).expanduser() if worktrees_root else None,
             claude_binary=os.environ.get("KESTREL_CLAUDE_BINARY", "claude"),
             server_url=os.environ.get("KESTREL_SERVER_URL", DEFAULT_SERVER_URL),
@@ -169,6 +233,7 @@ class Config:
             brain_claude_binary=os.environ.get("KESTREL_BRAIN_CLAUDE_BINARY"),
             brain_timeout_seconds=float(os.environ.get("KESTREL_BRAIN_TIMEOUT_SECONDS", "60")),
             brain_mcp_server_command=os.environ.get("KESTREL_BRAIN_MCP_COMMAND"),
+            validation=_build_validation(list(claude_projects)),
         )
 
     def ensure_dirs(self) -> None:
