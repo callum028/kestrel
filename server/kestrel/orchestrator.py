@@ -2,8 +2,15 @@
 
 One pass over everything in flight. Deliberately boring and deterministic: it
 reads state, applies the ladders, and acts. No model is consulted anywhere in
-this file, which is the point - the thing supervising an unreliable agent must
-not itself be unreliable.
+this file for *whether* to nudge, park, merge, or escalate - the thing
+supervising an unreliable agent must not itself be unreliable. The one
+exception is wording: once a delivery is decided, `narrate` may ask the
+brain to reword its facts in Kestrel's voice (`brain/narration.py`) before
+they go to Callum. That never changes what was decided or blocks on the
+brain being reachable - `narrate()` falls back to a fixed deterministic
+template on any failure, and `narrate` does the same outright when no
+narrator is configured at all (the brain is off), so this file's own facts
+always reach him even if every model call in it is broken.
 
 The nine-hour overnight loss is the shape this was written against. Under this
 loop it costs about fifteen minutes and one sentence.
@@ -11,6 +18,7 @@ loop it costs about fifteen minutes and one sentence.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -18,6 +26,7 @@ from kestrel_agent.worktrees import task_branch
 
 from .attention import AttentionState, Urgency
 from .board_sync import BoardSync
+from .brain.narration import NarrationKind, NarrationRequest, fallback_text
 from .delivery import DeliveryTracker
 from .devlock import DevLock
 from .events import EventKind, EventLog
@@ -82,6 +91,11 @@ class TickReport:
 # just delay the one thing that helps: moving on and reporting it.
 _IMMEDIATE_PARK = {StallReason.PROCESS_DIED, StallReason.STARTUP_STUCK}
 
+# What `Runtime` hands in as `narrator` when the brain is configured - the
+# same shape as `narration.narrate` with `runner`/`identity_dir` already
+# bound, so this file never needs to know about `BrainRunner` at all.
+Narrator = Callable[[NarrationRequest], Awaitable[str]]
+
 
 class Orchestrator:
     def __init__(
@@ -98,6 +112,7 @@ class Orchestrator:
         validation: dict[str, ProjectValidation] | None = None,
         validation_runner: ValidationRunner | None = None,
         health_checker: HealthChecker | None = None,
+        narrator: Narrator | None = None,
     ) -> None:
         self._tasks = tasks
         self._log = log
@@ -111,6 +126,22 @@ class Orchestrator:
         self._validation = validation or {}
         self._validation_runner = validation_runner or ValidationRunner()
         self._health_checker = health_checker
+        # None whenever the brain is off (no `KESTREL_BRAIN_CLAUDE_BINARY`,
+        # see runtime.py) - `narrate` treats that the same as a brain call
+        # that failed: the fixed template, never a missing delivery.
+        self._narrator = narrator
+
+    async def narrate(
+        self, kind: NarrationKind, facts: list[str], *, claude_question: str | None = None
+    ) -> str:
+        """Reword a delivery already decided - never asked to decide
+        anything itself. `claude_question` is Claude's own text, carried
+        through to `narrate()` so it can enforce its own contract (reaches
+        Callum verbatim, appended if the model drops it)."""
+        request = NarrationRequest(kind=kind, facts=facts, claude_question=claude_question)
+        if self._narrator is None:
+            return fallback_text(request)
+        return await self._narrator(request)
 
     def _health(self) -> HealthChecker:
         # Built lazily - most tests never configure a URL wait or deploy
@@ -146,7 +177,7 @@ class Orchestrator:
         await self._check_waits(now, attention, report)
         await self._check_landings(now, attention, report)
         await self._check_validations(now, attention, report)
-        self._check_dev_lock(now, attention, report)
+        await self._check_dev_lock(now, attention, report)
         self._escalate_unread(now, report)
         return report
 
@@ -204,8 +235,13 @@ class Orchestrator:
                 attention=attention,
                 report=report,
                 reason=f"no {task.executor} executor registered",
-                body=f"{task.handle} needs a {task.executor} executor and none is registered, "
-                f"so it cannot be supervised. Parked.",
+                facts=[
+                    (
+                        f"{task.handle} needs a {task.executor} executor and none is registered, "
+                        f"so it cannot be supervised"
+                    ),
+                    "parked",
+                ],
             )
             return
 
@@ -217,7 +253,7 @@ class Orchestrator:
                 attention=attention,
                 report=report,
                 reason=str(verdict.reason),
-                body=f"{task.handle}: {verdict.evidence}",
+                facts=[f"{task.handle}: {verdict.evidence}"],
             )
             return
 
@@ -252,8 +288,10 @@ class Orchestrator:
             attention=attention,
             report=report,
             reason=str(verdict.reason),
-            body=f"{task.handle} stalled: {verdict.evidence} Parked after "
-            f"{task.nudges} nudges and moved on.",
+            facts=[
+                f"{task.handle} stalled: {verdict.evidence}",
+                f"parked after {task.nudges} nudges and moved on",
+            ],
         )
 
     async def _on_undelivered_nudge(
@@ -280,10 +318,19 @@ class Orchestrator:
                 {"reason": reason, "would_have_sent": verdict.evidence},
                 task_id=task.id,
             )
+            body = await self.narrate(
+                NarrationKind.NEEDS_YOU,
+                [
+                    (
+                        f"{task.handle} needs a nudge ({verdict.evidence}) but you're already in "
+                        f"the session"
+                    ),
+                    "want me to send it, or are you on it?",
+                ],
+            )
             self._deliveries.send(
                 subject=f"{task.handle}: nudge held back",
-                body=f"{task.handle} needs a nudge ({verdict.evidence}) but you're already in "
-                f"the session. Want me to send it, or are you on it?",
+                body=body,
                 urgency=Urgency.NORMAL,
                 state=attention,
                 task_id=task.id,
@@ -310,7 +357,7 @@ class Orchestrator:
         attention: AttentionState,
         report: TickReport,
         reason: str,
-        body: str,
+        facts: list[str],
     ) -> None:
         """Park and move on. Reclaiming the night matters more than asking
         permission, so this is never urgent - the system already handled it by
@@ -318,6 +365,7 @@ class Orchestrator:
         self._tasks.transition(task.id, TaskState.PARKED, reason=reason)
         if executor is not None:
             await executor.stop(task, reason="parked")
+        body = await self.narrate(NarrationKind.SOMETHING_WRONG, facts)
         self._deliveries.send(
             subject=f"{task.handle} parked",
             body=body,
@@ -362,10 +410,19 @@ class Orchestrator:
                     TaskState.NEEDS_INPUT,
                     reason=f"wait on {wait.kind} expired: {final}",
                 )
+                body = await self.narrate(
+                    NarrationKind.NEEDS_YOU,
+                    [
+                        (
+                            f"{task.handle} registered a {wait.kind} wait that never resolved: "
+                            f"{final}"
+                        ),
+                        f"it has been waiting since {wait.created_at.isoformat()}",
+                    ],
+                )
                 self._deliveries.send(
                     subject=f"{task.handle} needs you",
-                    body=f"{task.handle} registered a {wait.kind} wait that never resolved: "
-                    f"{final}. It has been waiting since {wait.created_at.isoformat()}.",
+                    body=body,
                     urgency=Urgency.NORMAL,
                     state=attention,
                     task_id=task.id,
@@ -413,10 +470,19 @@ class Orchestrator:
         outcome = await executor.send(task, message)
         if outcome.status != "ok":
             # Same rule as a held-back nudge: never silently drop it.
+            body = await self.narrate(
+                NarrationKind.SOMETHING_WRONG,
+                [
+                    (
+                        f"{task.handle}'s wait resolved ({message}) but I couldn't wake the "
+                        f"session ({outcome.reason})"
+                    ),
+                    "passing it along here instead",
+                ],
+            )
             self._deliveries.send(
                 subject=f"{task.handle}: wait resolved",
-                body=f"{task.handle}'s wait resolved ({message}) but I couldn't wake the "
-                f"session ({outcome.reason}). Passing it along here instead.",
+                body=body,
                 urgency=Urgency.NORMAL,
                 state=attention,
                 task_id=task.id,
@@ -497,10 +563,19 @@ class Orchestrator:
             self._tasks.transition(
                 task.id, TaskState.PARKED, reason=f"CI failed before merge: {status.summary}"
             )
+            body = await self.narrate(
+                NarrationKind.SOMETHING_WRONG,
+                [
+                    (
+                        f"{task.handle}'s PR ({pr.url}) failed CI before it could merge: "
+                        f"{status.summary}"
+                    ),
+                    "parked for a follow-up",
+                ],
+            )
             self._deliveries.send(
                 subject=f"{task.handle}: CI failed at landing",
-                body=f"{task.handle}'s PR ({pr.url}) failed CI before it could merge: "
-                f"{status.summary}. Parked for a follow-up.",
+                body=body,
                 urgency=Urgency.NORMAL,
                 state=attention,
                 task_id=task.id,
@@ -519,10 +594,19 @@ class Orchestrator:
             self._tasks.transition(
                 task.id, TaskState.PARKED, reason=f"merge refused: {outcome.reason}"
             )
+            body = await self.narrate(
+                NarrationKind.SOMETHING_WRONG,
+                [
+                    (
+                        f"{task.handle}'s PR ({pr.url}) is green but the merge was refused: "
+                        f"{outcome.reason}"
+                    ),
+                    "parked for a follow-up",
+                ],
+            )
             self._deliveries.send(
                 subject=f"{task.handle}: merge refused",
-                body=f"{task.handle}'s PR ({pr.url}) is green but the merge was refused: "
-                f"{outcome.reason}. Parked for a follow-up.",
+                body=body,
                 urgency=Urgency.NORMAL,
                 state=attention,
                 task_id=task.id,
@@ -690,10 +774,16 @@ class Orchestrator:
         except Exception as exc:  # noqa: BLE001 - never let a bad run wedge the lock
             self._dev_lock.release(task.id)
             self._tasks.transition(task.id, TaskState.PARKED, reason=f"validation crashed: {exc}")
+            body = await self.narrate(
+                NarrationKind.SOMETHING_WRONG,
+                [
+                    f"{task.handle}'s validation run raised {type(exc).__name__}: {exc}",
+                    "dev lock released; parked for a follow-up",
+                ],
+            )
             self._deliveries.send(
                 subject=f"{task.handle}: validation crashed",
-                body=f"{task.handle}'s validation run raised {type(exc).__name__}: {exc}. "
-                f"Dev lock released; parked for a follow-up.",
+                body=body,
                 urgency=Urgency.NORMAL,
                 state=attention,
                 task_id=task.id,
@@ -772,9 +862,10 @@ class Orchestrator:
     ) -> None:
         self._dev_lock.release(task.id)
         self._tasks.transition(task.id, TaskState.DONE, reason=note)
+        body = await self.narrate(NarrationKind.FINISHED, [f"{task.handle} finished: {note}"])
         self._deliveries.send(
             subject=f"{task.handle} finished",
-            body=f"{task.handle} finished: {note}.",
+            body=body,
             urgency=Urgency.NORMAL,
             state=attention,
             task_id=task.id,
@@ -817,9 +908,10 @@ class Orchestrator:
             self._tasks.transition(task.id, TaskState.PARKED, reason=reason)
             if executor is not None:
                 await executor.stop(task, reason="parked")
+            body = await self.narrate(NarrationKind.SOMETHING_WRONG, [message])
             self._deliveries.send(
                 subject=f"{task.handle} parked",
-                body=message,
+                body=body,
                 urgency=Urgency.NORMAL,
                 state=attention,
                 task_id=task.id,
@@ -844,10 +936,13 @@ class Orchestrator:
             self._tasks.transition(
                 task.id, TaskState.PARKED, reason=f"{reason}; session unreachable"
             )
+            body = await self.narrate(
+                NarrationKind.SOMETHING_WRONG,
+                [message, f"also could not reach the session to say so directly: {outcome.reason}"],
+            )
             self._deliveries.send(
                 subject=f"{task.handle} parked",
-                body=f"{message}\n\n(Also could not reach the session to say so directly: "
-                f"{outcome.reason}.)",
+                body=body,
                 urgency=Urgency.NORMAL,
                 state=attention,
                 task_id=task.id,
@@ -857,9 +952,10 @@ class Orchestrator:
             report.parked.append(task.handle)
             return
 
+        body = await self.narrate(NarrationKind.SOMETHING_WRONG, [message])
         self._deliveries.send(
             subject=f"{task.handle} reopened",
-            body=message,
+            body=body,
             urgency=Urgency.NORMAL,
             state=attention,
             task_id=task.id,
@@ -868,16 +964,27 @@ class Orchestrator:
         )
         report.reopened.append(task.handle)
 
-    def _check_dev_lock(self, now: datetime, attention: AttentionState, report: TickReport) -> None:
+    async def _check_dev_lock(
+        self, now: datetime, attention: AttentionState, report: TickReport
+    ) -> None:
         stuck = self._dev_lock.stuck(now)
         if stuck is None:
             return
         report.stuck_deploy = stuck.task_id
         waiting = self._dev_lock.queue()
+        body = await self.narrate(
+            NarrationKind.SOMETHING_WRONG,
+            [
+                (
+                    f"dev has been held for {int(stuck.held_for(now).total_seconds() // 60)} minutes "
+                    f"by {stuck.task_id}"
+                ),
+                f"{len(waiting)} task(s) queued behind it",
+            ],
+        )
         self._deliveries.send(
             subject="dev deploy stuck",
-            body=f"Dev has been held for {int(stuck.held_for(now).total_seconds() // 60)} minutes "
-            f"by {stuck.task_id}, with {len(waiting)} task(s) queued behind it.",
+            body=body,
             urgency=Urgency.NORMAL,
             state=attention,
             now=now,
