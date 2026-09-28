@@ -348,6 +348,11 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
                 {
                     "claimed": "done",
                     "last_assistant_message": hook.last_assistant_message,
+                    # Same text as `last_assistant_message`, under the name
+                    # `task_detail`/`kestrel-mcp`'s `task_detail` tool (and the
+                    # phone UI) actually look for - Claude's own words, kept
+                    # verbatim as the task's final report once it closes.
+                    "report": hook.last_assistant_message,
                     "stop_reason": hook.stop_reason,
                 },
                 task_id=task_id,
@@ -399,7 +404,7 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
         ]
 
     @app.post("/tasks")
-    def create_task(body: TaskIn) -> dict[str, Any]:
+    async def create_task(body: TaskIn) -> dict[str, Any]:
         if rt.tasks.by_handle(body.handle) is not None:
             return {"status": "refused", "reason": f"{body.handle} already exists"}
         task = rt.tasks.create(
@@ -410,6 +415,17 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
             scope=body.scope,
             ticket_ref=body.ticket_ref,
         )
+        # A task with a registered executor is briefed and started right
+        # away - creating one (from the board, from the brain's start_task
+        # tool, or directly) is "go do this now", not "queue this for later".
+        # Left at CREATED, with no executor registered for it (a kind not
+        # built yet, or the Claude Code executor simply not configured) -
+        # the same gap /tasks/{handle}/retry already tolerates.
+        executor = rt.executors.get(task.executor)
+        if executor is not None:
+            task = rt.tasks.transition(task.id, TaskState.BRIEFED, reason="executor available")
+            task = rt.tasks.transition(task.id, TaskState.RUNNING, reason="started")
+            await executor.start(task, brief=task.goal)
         return {"status": "ok", "id": task.id, "handle": task.handle, "state": task.state}
 
     @app.post("/tasks/{handle}/state/{to}")
@@ -703,7 +719,17 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
                 pending_question = e.payload.get("message")
                 break
 
-        ci = next((e.payload for e in reversed(events) if e.kind == EventKind.VALIDATION_RUN), None)
+        # `ci` is GitHub's own pre-merge check on the PR branch (CI_CHECKED,
+        # from the orchestrator's landing gate) - `validation` is Kestrel's
+        # separate, post-merge authoritative run against dev (VALIDATION_RUN).
+        # They used to be conflated under one `ci` key pulling only the
+        # latter, which meant a task still waiting on GitHub CI (or one that
+        # never reaches validation at all, e.g. no validation configured)
+        # reported nothing here at all.
+        ci = next((e.payload for e in reversed(events) if e.kind == EventKind.CI_CHECKED), None)
+        validation = next(
+            (e.payload for e in reversed(events) if e.kind == EventKind.VALIDATION_RUN), None
+        )
         final_report = next(
             (
                 e.payload.get("report")
@@ -737,6 +763,7 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
             "pr_url": pr_url,
             "ticket_url": ticket_url,
             "ci": ci,
+            "validation": validation,
             "pending_wait": pending_wait,
             "pending_question": pending_question,
             "final_report": final_report,

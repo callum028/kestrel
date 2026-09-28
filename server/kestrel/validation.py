@@ -21,8 +21,10 @@ the project rule that tests never do either for real.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import signal
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -200,6 +202,14 @@ class ValidationRunner:
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                # A new session (process group) so a timeout can kill whatever
+                # the shell spawned, not just the shell itself - without this,
+                # `proc.kill()` only signals `/bin/sh -c ...`, and any child it
+                # forked (e.g. a test runner) is orphaned and keeps running,
+                # keeping the stdout pipe open until IT exits naturally. That
+                # was a real 30-second-per-run hang in this class's own test
+                # for exactly this timeout path.
+                start_new_session=True,
             )
         except OSError as exc:
             return RunOutcome(ok=False, summary=f"failed to start validation command: {exc}")
@@ -209,7 +219,8 @@ class ValidationRunner:
                 proc.communicate(), timeout=command.timeout.total_seconds()
             )
         except TimeoutError:
-            proc.kill()
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
             await proc.wait()
             minutes = int(command.timeout.total_seconds() // 60)
             return RunOutcome(

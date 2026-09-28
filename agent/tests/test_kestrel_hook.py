@@ -38,7 +38,10 @@ class _Recorder(BaseHTTPRequestHandler):
 def server():
     _Recorder.requests = []
     httpd = HTTPServer(("127.0.0.1", 0), _Recorder)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    # `serve_forever`'s default 0.5s poll_interval is also how long
+    # `httpd.shutdown()` can take to notice - a much shorter one makes
+    # teardown near-instant instead of a flat 0.5s per test.
+    thread = threading.Thread(target=httpd.serve_forever, args=(0.01,), daemon=True)
     thread.start()
     try:
         yield f"http://127.0.0.1:{httpd.server_port}"

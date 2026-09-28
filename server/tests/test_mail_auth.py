@@ -74,6 +74,7 @@ def test_declined_consent_raises():
 
 def test_slow_down_backs_off_and_still_completes():
     poll_count = {"n": 0}
+    slept: list[float] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/devicecode"):
@@ -85,5 +86,9 @@ def test_slow_down_backs_off_and_still_completes():
             200, json={"access_token": "a", "refresh_token": "r", "expires_in": 1}
         )
 
-    token = run_device_code_flow(TENANT, CLIENT, client=client_for(handler))
+    # `sleep` is faked so the test covers the backoff logic (interval grows by
+    # 5 after a slow_down) without actually waiting out a real, seconds-scale
+    # polling interval - this was previously the slowest test in the suite.
+    token = run_device_code_flow(TENANT, CLIENT, client=client_for(handler), sleep=slept.append)
     assert token == "r"
+    assert slept == [0, 5]  # the device code's own interval, then +5 after slow_down

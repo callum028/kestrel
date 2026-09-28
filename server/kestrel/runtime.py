@@ -17,6 +17,8 @@ from kestrel_agent.host_client import SessionHostClient
 from .attention import AttentionState, Signals, Urgency, compute
 from .board import Board, build_board
 from .board_sync import BoardSync
+from .brain.narration import NarrationKind, NarrationRequest
+from .brain.narration import narrate as _narrate_via_brain
 from .brain.responder import BrainResponder
 from .brain.runner import BrainConfig, BrainRunner, MCPServerSpec
 from .config import Config
@@ -32,7 +34,7 @@ from .graph_mail import GraphMailConfig, GraphMailReader
 from .mail import FakeMailReader, MailReader, RecordingMailReader
 from .memory import MemoryStore
 from .observations import ObservationStore
-from .orchestrator import Orchestrator, TickReport
+from .orchestrator import Narrator, Orchestrator, TickReport
 from .outcomes import NotFound, Ok, Outcome, Refused
 from .push import PushSender, PushSubscriptionStore, load_or_create_vapid_keys
 from .supervision import (
@@ -72,6 +74,41 @@ def _build_mail_reader(config: Config, log: EventLog) -> MailReader:
         )
         inner = FakeMailReader()
     return RecordingMailReader(inner, log)
+
+
+def _build_narrator(config: Config, log: EventLog) -> Narrator | None:
+    """`None` when the brain is off (no `KESTREL_BRAIN_CLAUDE_BINARY`) - the
+    orchestrator's own `narrate()` treats that identically to a brain call
+    that failed, falling back to the fixed template, so this is the one
+    place "is the brain configured at all" is decided for delivery wording.
+    A narration call needs no MCP tools of its own (it only ever rewords the
+    facts it is given), so this runner is plain - unlike the responder's,
+    which is wired to `kestrel-mcp`."""
+    if not config.brain_claude_binary:
+        return None
+    runner = BrainRunner(
+        BrainConfig(
+            binary=config.brain_claude_binary,
+            base_args=config.brain_claude_base_args,
+            timeout_seconds=config.brain_timeout_seconds,
+            work_dir=config.brain_work_dir,
+        )
+    )
+
+    def _log_failure(exc: Exception) -> None:
+        # "The failure is logged, so a dead brain is never a silent one"
+        # (narration.py) - an event, not just a log line, since this is the
+        # kind of thing worth seeing in the task history, not just stderr.
+        log.append(
+            EventKind.BRAIN_CALL_FAILED, "kestrel", {"error": f"{type(exc).__name__}: {exc}"}
+        )
+
+    async def narrator(request: NarrationRequest) -> str:
+        return await _narrate_via_brain(
+            request, runner=runner, identity_dir=config.identity_dir, log_failure=_log_failure
+        )
+
+    return narrator
 
 
 def _build_brain_responder(config: Config, rt: Runtime) -> BrainResponder:
@@ -145,6 +182,7 @@ class Runtime:
         executors: dict[str, Executor] | None = None,
         board: Board | None = None,
         responder: Responder | None = None,
+        github: GitHub | None = None,
     ) -> Runtime:
         config.ensure_dirs()
         conn = connect(config.db_path)
@@ -183,7 +221,7 @@ class Runtime:
         board = board or build_board(config.board)
         board_sync = BoardSync(board, tasks, log, conn)
         waits = WaitStore(conn, log)
-        github = build_github(config)
+        github = github if github is not None else build_github(config)
         memory = MemoryStore(config.memory_repo, log)
         rt = cls(
             config=config,
@@ -204,6 +242,7 @@ class Runtime:
                 github=github,
                 board_sync=board_sync,
                 validation=config.validation,
+                narrator=_build_narrator(config, log),
             ),
             terminals=terminals,
             mail=_build_mail_reader(config, log),
@@ -381,10 +420,19 @@ class Runtime:
                     task_id=task.id,
                 )
         if unaccountable:
+            body = await self.orchestrator.narrate(
+                NarrationKind.SOMETHING_WRONG,
+                [
+                    (
+                        f"on restart, {len(unaccountable)} task(s) believed running had no live "
+                        f"session on the host: {', '.join(unaccountable)}"
+                    ),
+                    "the next tick will act on it",
+                ],
+            )
             self.deliveries.send(
                 subject="restart: tasks unaccounted for",
-                body=f"On restart, {len(unaccountable)} task(s) believed running had no live "
-                f"session on the host: {', '.join(unaccountable)}. The next tick will act on it.",
+                body=body,
                 urgency=Urgency.NORMAL,
                 state=self.attention(now),
                 now=now,

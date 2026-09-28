@@ -35,7 +35,7 @@ from pathlib import Path
 
 from kestrel_agent.claude_settings import write_brief, write_hooks_settings
 from kestrel_agent.host_client import SessionHostClient
-from kestrel_agent.worktrees import ensure_worktree
+from kestrel_agent.worktrees import WorktreeError, default_branch, ensure_worktree
 
 from ..events import EventKind, EventLog
 from ..outcomes import Ok, Outcome, Refused
@@ -256,11 +256,12 @@ class ClaudeCodeExecutor:
         return terminal.alive
 
     async def progress_hash(self, task: Task) -> str | None:
-        """A hash of the worktree's uncommitted state (tracked changes plus
-        untracked files), used as the progress proxy: unchanged for ~15
-        minutes while the session is active means nothing is actually
-        happening, whatever the transcript looks like. `None` when the task
-        has no worktree yet (e.g. the project cannot be resolved)."""
+        """A hash of everything the session has changed since its branch
+        forked (committed or not) plus untracked files, used as the progress
+        proxy: unchanged for ~15 minutes while the session is active means
+        nothing is actually happening, whatever the transcript looks like.
+        `None` when the task has no worktree yet (e.g. the project cannot be
+        resolved)."""
         try:
             worktree = self._worktree_for(task)
         except NoProjectConfigured:
@@ -308,6 +309,29 @@ class ClaudeCodeExecutor:
             return None
         return worktree
 
+    async def rebranch_for_fix(self, task: Task, merge_sha: str) -> str | None:
+        """After a failed validation, moves the worktree off the detached
+        `merge_sha` HEAD that `prepare_validation` left it on and onto a
+        fresh branch cut from that same commit - `kestrel/<handle>-fix-<n>`,
+        `n` counting up per task so a task that fails validation more than
+        once does not collide with its own earlier fix branch. Without this,
+        a session sent back to `RUNNING` after a validation failure is left
+        in detached HEAD, where `git push`/opening a follow-up PR does not
+        work the normal way. `None` when there is no worktree to rebranch
+        (mirrors `prepare_validation`'s own contract) or the checkout fails.
+        """
+        try:
+            worktree = self._worktree_for(task)
+        except NoProjectConfigured:
+            return None
+        if not worktree.exists():
+            return None
+        branch = await asyncio.to_thread(_next_fix_branch, worktree, task.handle)
+        result = await asyncio.to_thread(_git, "checkout", "-B", branch, merge_sha, cwd=worktree)
+        if result.returncode != 0:
+            return None
+        return branch
+
     async def symbol_exists(self, task: Task, symbol: str) -> bool:
         """Whether `symbol` appears anywhere in the worktree's tracked
         content right now - what a stated blocker is checked against before
@@ -325,24 +349,65 @@ def _git(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
 
 
+def _next_fix_branch(worktree: Path, handle: str) -> str:
+    """The next unused `kestrel/<handle>-fix-<n>` name, `n` starting at 1 -
+    scanned off the worktree's own local branches so this stays correct
+    across restarts with no state of its own to keep in sync."""
+    prefix = f"kestrel/{handle}-fix-"
+    refs = _git("for-each-ref", "--format=%(refname:short)", "refs/heads/", cwd=worktree)
+    numbers = [
+        int(name[len(prefix) :])
+        for name in refs.stdout.splitlines()
+        if name.startswith(prefix) and name[len(prefix) :].isdigit()
+    ]
+    return f"{prefix}{max(numbers, default=0) + 1}"
+
+
+def _diff_base(worktree: Path) -> str:
+    """The point this worktree's branch actually forked from, not bare
+    `HEAD` - `git diff HEAD` is empty the moment everything is committed,
+    which is the *normal* end state for a session that commits and pushes
+    before its turn ends (the realistic path to opening a PR), not an edge
+    case. Diffing against bare HEAD meant a fully committed, successful
+    session's own claim of "done" looked identical to one that changed
+    nothing at all - both `check_completion_claim` and the progress-hash
+    staleness proxy need to see committed work as real evidence. Falls back
+    to "HEAD" only if the default branch can't be resolved at all (no
+    remote, no main/master, nothing checked out - see
+    `kestrel_agent.worktrees.default_branch`), which the untracked-files
+    half of both callers still covers regardless."""
+    try:
+        branch = default_branch(worktree)
+    except WorktreeError:
+        return "HEAD"
+    base = _git("merge-base", "HEAD", branch, cwd=worktree)
+    if base.returncode != 0 or not base.stdout.strip():
+        return "HEAD"
+    return base.stdout.strip()
+
+
 def _worktree_diff_hash(worktree: Path) -> str:
-    diff = _git("diff", "HEAD", cwd=worktree).stdout
+    base = _diff_base(worktree)
+    head = _git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
+    diff = _git("diff", base, cwd=worktree).stdout
     untracked = _git("status", "--porcelain", "--untracked-files=all", cwd=worktree).stdout
-    return hashlib.sha256((diff + untracked).encode()).hexdigest()
+    return hashlib.sha256((head + diff + untracked).encode()).hexdigest()
 
 
 def _worktree_diff(worktree: Path) -> Diff:
-    """Tracked changes (`git diff HEAD`) plus untracked files, in the shape
+    """Everything this session has done since its branch forked (tracked
+    changes since `_diff_base`, plus untracked files), in the shape
     `supervision.py`'s claim checks already expect: added/removed lines and
     the touched file list. Untracked files show up in `files` with no line
     content - there is nothing to diff against for a file that never existed
     before, but its path still matters for the spec-changes check."""
-    numstat = _git("diff", "HEAD", "--numstat", cwd=worktree).stdout
+    base = _diff_base(worktree)
+    numstat = _git("diff", base, "--numstat", cwd=worktree).stdout
     files = [line.split("\t")[-1] for line in numstat.splitlines() if line.strip()]
 
     added: list[str] = []
     removed: list[str] = []
-    patch = _git("diff", "HEAD", "--no-color", cwd=worktree).stdout
+    patch = _git("diff", base, "--no-color", cwd=worktree).stdout
     for line in patch.splitlines():
         if line.startswith(("+++", "---")):
             continue

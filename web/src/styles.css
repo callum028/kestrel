@@ -227,8 +227,12 @@ button {
 .state.needs_input {
   color: var(--warn);
 }
-.state.failed {
+.state.failed,
+.state.failure {
   color: var(--bad);
+}
+.state.success {
+  color: var(--good);
 }
 
 .row {
@@ -631,6 +635,13 @@ button {
   letter-spacing: 0.06em;
   color: var(--text-faint);
   margin: 16px 0 4px;
+}
+
+.phone-task-detail .final-report,
+.phone-task-detail .claude-question {
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .phone-back {

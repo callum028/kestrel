@@ -15,6 +15,33 @@ export interface Task {
   criteria: string[];
 }
 
+// GitHub's own pre-merge check on the PR branch - distinct from `validation`
+// below, since a task can be waiting on one without the other having run.
+export interface CiStatus {
+  pr_number?: number;
+  state: string;
+  summary: string;
+}
+
+// Kestrel's own post-merge authoritative run against dev.
+export interface ValidationResult {
+  ok: boolean;
+  summary: string;
+  failing_tests: string[];
+}
+
+// GET /tasks/{handle} - everything the summary list doesn't carry.
+export interface TaskDetail extends Task {
+  time_in_state_seconds: number;
+  pr_url: string | null;
+  ticket_url: string | null;
+  ci: CiStatus | null;
+  validation: ValidationResult | null;
+  pending_wait: boolean;
+  pending_question: string | null;
+  final_report: string | null;
+}
+
 export interface TerminalInfo {
   id: string;
   cwd: string;
@@ -101,6 +128,7 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   state: () => json<State>("/state"),
   tasks: () => json<Task[]>("/tasks"),
+  taskDetail: (handle: string) => json<Outcome<TaskDetail>>(`/tasks/${handle}`),
   deliveries: () => json<Delivery[]>("/deliveries"),
 
   terminals: () => json<TerminalInfo[]>("/terminals"),

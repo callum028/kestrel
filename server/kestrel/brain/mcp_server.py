@@ -134,9 +134,11 @@ def build_server(
     @server.tool()
     async def task_detail(handle: str) -> dict[str, Any]:
         """Full detail for one task: state, time in state, PR link, the last
-        CI/validation result, whether it's queued on the dev lock, any
-        pending question from Claude (verbatim), and the final report once
-        closed."""
+        GitHub CI result on the PR branch (`ci`) and Kestrel's own post-merge
+        validation run (`validation`) - distinct, since a task can be waiting
+        on one without the other having run at all - whether it's queued on
+        the dev lock, any pending question from Claude (verbatim), and the
+        final report (Claude's own last words) once closed."""
         return await _get(f"/tasks/{handle}")
 
     @server.tool()

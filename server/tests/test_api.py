@@ -61,6 +61,45 @@ def test_creating_the_same_handle_twice_is_refused_not_duplicated(client):
     assert "already exists" in second["reason"]
 
 
+def test_creating_a_task_with_no_executor_registered_stays_created(client):
+    """No executor for `claude_code` is wired into the bare `client` fixture -
+    the same "nothing to supervise with" case `_intervene` reports on the
+    tick side, here just meaning nothing auto-starts."""
+    result = make_task(client)
+    assert result["state"] == "created"
+
+
+def test_creating_a_task_with_a_registered_executor_briefs_and_starts_it(config):
+    from kestrel.api import create_app
+    from kestrel.executors import ExecutorKind
+    from kestrel.outcomes import Ok
+    from kestrel.runtime import Runtime
+
+    class RecordingExecutor:
+        kind = ExecutorKind.CLAUDE_CODE
+
+        def __init__(self):
+            self.started = []
+
+        async def start(self, task, brief):
+            self.started.append((task.handle, brief))
+
+        async def send(self, task, message):
+            return Ok()
+
+        async def stop(self, task, reason):
+            pass
+
+    executor = RecordingExecutor()
+    rt = Runtime.build(config, executors={ExecutorKind.CLAUDE_CODE: executor})
+    app = create_app(runtime=rt)
+    with TestClient(app, headers={"Authorization": f"Bearer {app.state.token}"}) as c:
+        result = make_task(c)
+
+    assert result["state"] == "running"
+    assert executor.started == [("KES-31", "Handle token refresh failure")]
+
+
 def test_an_unattributed_hook_is_recorded_rather_than_dropped(client):
     body = client.post(
         "/hooks/claude",
@@ -328,6 +367,82 @@ def test_stop_carries_the_claims_own_text(client):
     closed = [e for e in client.get("/events").json() if e["kind"] == "task.closed"]
     assert closed[0]["payload"]["last_assistant_message"] == "Done, all tests pass."
     assert closed[0]["payload"]["stop_reason"] == "end_turn"
+
+
+# --- task detail: final report, CI, validation (item 2) ---------------------
+
+
+def test_task_detail_surfaces_claudes_final_report_verbatim(client):
+    make_task(client)
+    client.post("/sessions/bind", json={"session_id": "sess-1", "task_handle": "KES-31"})
+    client.post(
+        "/hooks/claude",
+        json={
+            "hook_event_name": "Stop",
+            "session_id": "sess-1",
+            "last_assistant_message": "Done, all tests pass.",
+            "stop_reason": "end_turn",
+        },
+    )
+
+    detail = client.get("/tasks/KES-31").json()
+    assert detail["final_report"] == "Done, all tests pass."
+
+
+def test_task_detail_final_report_is_the_most_recent_stop(client):
+    make_task(client)
+    client.post("/sessions/bind", json={"session_id": "sess-1", "task_handle": "KES-31"})
+    for message in ("first attempt, not quite", "second attempt, done"):
+        client.post(
+            "/hooks/claude",
+            json={
+                "hook_event_name": "Stop",
+                "session_id": "sess-1",
+                "last_assistant_message": message,
+            },
+        )
+
+    detail = client.get("/tasks/KES-31").json()
+    assert detail["final_report"] == "second attempt, done"
+
+
+def test_task_detail_has_no_final_report_before_any_stop(client):
+    make_task(client)
+    detail = client.get("/tasks/KES-31").json()
+    assert detail["final_report"] is None
+
+
+def test_task_detail_ci_reflects_the_github_landing_check_not_validation(client):
+    """`ci` (GitHub's pre-merge check on the PR branch) and `validation`
+    (Kestrel's own post-merge run) are two different things a task can be
+    waiting on independently - conflating them under one `ci` key meant a
+    task still waiting on GitHub CI reported nothing at all."""
+    task = make_task(client)
+    from kestrel.events import EventKind
+
+    rt = client.app.state.runtime
+    rt.log.append(
+        EventKind.CI_CHECKED,
+        "kestrel",
+        {"pr_number": 7, "state": "pending", "summary": "still running: build"},
+        task_id=task["id"],
+    )
+
+    detail = client.get("/tasks/KES-31").json()
+    assert detail["ci"] == {"pr_number": 7, "state": "pending", "summary": "still running: build"}
+    assert detail["validation"] is None
+
+    rt.log.append(
+        EventKind.VALIDATION_RUN,
+        "kestrel",
+        {"ok": True, "summary": "9 test(s) passed", "failing_tests": []},
+        task_id=task["id"],
+    )
+
+    detail = client.get("/tasks/KES-31").json()
+    # The later CI_CHECKED stays put - VALIDATION_RUN never overwrites it.
+    assert detail["ci"] == {"pr_number": 7, "state": "pending", "summary": "still running: build"}
+    assert detail["validation"] == {"ok": True, "summary": "9 test(s) passed", "failing_tests": []}
 
 
 # --- kestrel-owned waits (item 1) --------------------------------------------

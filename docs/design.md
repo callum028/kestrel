@@ -6,6 +6,8 @@ and should be moved into code.
 
 Supersedes the v1 design (`callum028/kestrel`, archived). See [Superseded decisions](#superseded-decisions).
 
+> **Note:** a separate v1 implementation spec (tracked outside this repo) supersedes this document wherever they differ - this file has not been fully reconciled with v1 as actually built.
+
 ---
 
 ## 1. What Kestrel is

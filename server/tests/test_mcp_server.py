@@ -116,6 +116,33 @@ async def test_task_detail_surfaces_a_pending_question_verbatim(server):
     assert detail["pending_question"] == "Is the retry limit per-request or per-session?"
 
 
+async def test_task_detail_surfaces_the_final_report_and_ci_state(server):
+    s, rt = server
+    task = rt.tasks.create(handle="KES-31", goal="fix it", criteria=[], executor="claude_code")
+    rt.log.append(
+        EventKind.CI_CHECKED,
+        "kestrel",
+        {"pr_number": 3, "state": "success", "summary": "all green"},
+        task_id=task.id,
+    )
+    rt.log.append(
+        EventKind.TASK_CLOSED,
+        "claude",
+        {
+            "claimed": "done",
+            "last_assistant_message": "Done.",
+            "report": "Done.",
+            "stop_reason": "end_turn",
+        },
+        task_id=task.id,
+    )
+
+    detail = await call(s, "task_detail", handle="KES-31")
+    assert detail["final_report"] == "Done."
+    assert detail["ci"] == {"pr_number": 3, "state": "success", "summary": "all green"}
+    assert detail["validation"] is None
+
+
 async def test_reply_to_task_without_a_registered_executor_is_refused(server):
     s, rt = server
     rt.tasks.create(handle="KES-31", goal="fix it", criteria=[], executor="claude_code")

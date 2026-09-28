@@ -35,11 +35,18 @@ def _run(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=False)
 
 
-def _default_branch(repo_path: Path) -> str:
+def default_branch(repo_path: Path) -> str:
     """Best-effort: origin's HEAD if there is a remote, else whichever of
     main/master exists, else whatever is currently checked out. Tests run
     against throwaway repos with no remote, so every rung has to work without
-    one."""
+    one.
+
+    Public (not just this module's own `ensure_worktree`) because
+    `executors/claude_code.py` needs it too, to diff a task's worktree
+    against the point it actually forked from rather than against bare
+    `HEAD` - see `_worktree_diff`'s docstring there for why `HEAD` alone is
+    wrong once a session has committed anything, which is the normal case
+    for one that opens a PR before its turn ends."""
     symbolic = _run(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo_path)
     if symbolic.returncode == 0 and symbolic.stdout.strip():
         return symbolic.stdout.strip().rsplit("/", 1)[-1]
@@ -93,7 +100,7 @@ def ensure_worktree(repo_path: Path, worktrees_root: Path, handle: str) -> Path:
         # already local, just possibly stale.
         _run(["git", "fetch", "--all", "--prune"], repo_path)
 
-    branch = _default_branch(repo_path)
+    branch = default_branch(repo_path)
     result = _run(
         ["git", "worktree", "add", str(target), "-b", task_branch(handle), branch], repo_path
     )

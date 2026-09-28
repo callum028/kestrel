@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Callable
 
 import httpx
 
@@ -24,11 +25,19 @@ from .graph_mail import AUTHORITY, SCOPE, TokenStore
 
 
 def run_device_code_flow(
-    tenant_id: str, client_id: str, scope: str = SCOPE, client: httpx.Client | None = None
+    tenant_id: str,
+    client_id: str,
+    scope: str = SCOPE,
+    client: httpx.Client | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> str:
     """Blocks until the user completes sign-in, or the code expires. Returns
     the refresh token. Raises RuntimeError on anything else - declined
-    consent, an unregistered app, a mistyped tenant."""
+    consent, an unregistered app, a mistyped tenant.
+
+    `sleep` is real `time.sleep` by default - overridden in tests exercising
+    the `slow_down` backoff so they cover the retry logic without actually
+    waiting out the (real, seconds-scale) polling interval."""
     http = client or httpx.Client()
 
     resp = http.post(
@@ -46,7 +55,7 @@ def run_device_code_flow(
     deadline = time.monotonic() + device.get("expires_in", 900)
 
     while time.monotonic() < deadline:
-        time.sleep(interval)
+        sleep(interval)
         resp = http.post(
             f"{AUTHORITY}/{tenant_id}/oauth2/v2.0/token",
             data={
