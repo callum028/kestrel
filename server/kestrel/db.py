@@ -116,6 +116,29 @@ CREATE TABLE IF NOT EXISTS board_cursor (
     last_pushed_seq INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO board_cursor (id, last_poll_at, last_pushed_seq) VALUES (1, NULL, 0);
+
+-- The one Kestrel conversation, shared across every device - there is no
+-- per-client history because there is no per-client conversation. id is an
+-- autoincrementing cursor (like events.seq) so GET /conversation/messages
+-- ?after=<id> is a plain range scan, not a timestamp comparison.
+CREATE TABLE IF NOT EXISTS conversation_messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    role       TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    refs       TEXT NOT NULL DEFAULT '[]'
+);
+
+-- One row per browser/device that asked for Web Push. endpoint is the whole
+-- identity - the push service (not us) routes by it, and a re-subscribe from
+-- the same device arrives with a new endpoint, so REPLACE on it is wrong;
+-- endpoint itself is the primary key.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint   TEXT PRIMARY KEY,
+    p256dh     TEXT NOT NULL,
+    auth       TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 

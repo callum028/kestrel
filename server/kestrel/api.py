@@ -100,6 +100,24 @@ class AckIn(BaseModel):
     on: str
 
 
+class ConversationIn(BaseModel):
+    text: str
+
+
+class SubscriptionKeys(BaseModel):
+    p256dh: str
+    auth: str
+
+
+class SubscriptionIn(BaseModel):
+    endpoint: str
+    keys: SubscriptionKeys
+
+
+class UnsubscribeIn(BaseModel):
+    endpoint: str
+
+
 class TerminalIn(BaseModel):
     cwd: str
     command: list[str] | None = None
@@ -350,6 +368,47 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
     def resolve_observation(obs_id: str, state: ObservationState) -> dict[str, Any]:
         rt.observations.resolve(obs_id, state)
         return {"status": "ok", "state": state}
+
+    # --- conversation ---------------------------------------------------------
+    # The one Kestrel chat, shared across every device - see conversation.py
+    # for the brain-step contract. Distinct from a Claude chat (raw terminal
+    # output, one per session); this is Kestrel's own words.
+
+    @app.post("/conversation/messages")
+    async def post_conversation_message(body: ConversationIn) -> dict[str, Any]:
+        message = await rt.conversation.post_user_message(body.text)
+        return {"status": "ok", **message.to_dict()}
+
+    @app.get("/conversation/messages")
+    def list_conversation_messages(after: int = 0, limit: int = 200) -> list[dict[str, Any]]:
+        return [m.to_dict() for m in rt.conversation.since(after, limit)]
+
+    # --- web push ---------------------------------------------------------
+    # Notifications route through Kestrel's own delivery/attention model
+    # (docs/design.md §4.6) - this is the transport that reaches a closed app,
+    # plugged into DeliveryTracker as the PHONE_NOTIFICATION channel's side
+    # effect in Runtime.build. Subscribing/unsubscribing is a client telling
+    # Kestrel where it lives, not a decision about what gets sent.
+
+    @app.get("/push/vapid-public-key")
+    def vapid_public_key() -> dict[str, Any]:
+        return {"public_key": rt.vapid_public_key}
+
+    @app.post("/push/subscriptions")
+    def add_subscription(body: SubscriptionIn) -> dict[str, Any]:
+        rt.push_subscriptions.add(body.endpoint, body.keys.p256dh, body.keys.auth)
+        return {"status": "ok"}
+
+    @app.delete("/push/subscriptions")
+    def remove_subscription(body: UnsubscribeIn) -> dict[str, Any]:
+        removed = rt.push_subscriptions.remove(body.endpoint)
+        if not removed:
+            return {
+                "status": "not_found",
+                "searched_for": body.endpoint,
+                "looked_in": "subscriptions",
+            }
+        return {"status": "ok"}
 
     # --- terminals ----------------------------------------------------------
     # Terminals are a first-class surface, not a session viewer: N of them, some

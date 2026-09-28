@@ -17,6 +17,7 @@ from .attention import AttentionState, Signals, compute
 from .board import Board, build_board
 from .board_sync import BoardSync
 from .config import Config
+from .conversation import ConversationStore, Responder
 from .db import Database, connect
 from .delivery import DeliveryTracker
 from .devlock import DevLock
@@ -28,6 +29,7 @@ from .mail import FakeMailReader, MailReader, RecordingMailReader
 from .memory import MemoryStore
 from .observations import ObservationStore
 from .orchestrator import Orchestrator, TickReport
+from .push import PushSender, PushSubscriptionStore, load_or_create_vapid_keys
 from .tasks import TaskStore
 from .terminal_activity import HumanActivityTracker
 
@@ -74,6 +76,10 @@ class Runtime:
     mail: MailReader
     board: Board
     board_sync: BoardSync
+    conversation: ConversationStore
+    push_subscriptions: PushSubscriptionStore
+    push: PushSender
+    vapid_public_key: str
     human_activity: HumanActivityTracker = field(default_factory=HumanActivityTracker)
     executors: dict[str, Executor] = field(default_factory=dict)
 
@@ -88,12 +94,16 @@ class Runtime:
         config: Config,
         executors: dict[str, Executor] | None = None,
         board: Board | None = None,
+        responder: Responder | None = None,
     ) -> Runtime:
         config.ensure_dirs()
         conn = connect(config.db_path)
         log = EventLog(conn)
         tasks = TaskStore(conn, log)
-        deliveries = DeliveryTracker(conn, log)
+        vapid_keys = load_or_create_vapid_keys(config.vapid_key_path)
+        push_subscriptions = PushSubscriptionStore(conn, log)
+        push = PushSender(vapid_keys, push_subscriptions, log)
+        deliveries = DeliveryTracker(conn, log, on_phone_notify=push.notify_delivery)
         dev_lock = DevLock(conn)
         terminals = SessionHostClient(config.session_host_socket)
         human_activity = HumanActivityTracker()
@@ -135,6 +145,10 @@ class Runtime:
             mail=_build_mail_reader(config, log),
             board=board,
             board_sync=BoardSync(board, tasks, log, conn),
+            conversation=ConversationStore(conn, log, responder=responder),
+            push_subscriptions=push_subscriptions,
+            push=push,
+            vapid_public_key=vapid_keys.public_key_b64,
             human_activity=human_activity,
             executors=executors,
         )

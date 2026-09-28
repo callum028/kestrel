@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -55,9 +56,24 @@ def for_voice(body: str) -> str:
 
 
 class DeliveryTracker:
-    def __init__(self, conn: Database, log: EventLog) -> None:
+    def __init__(
+        self,
+        conn: Database,
+        log: EventLog,
+        on_phone_notify: Callable[[Delivery], None] | None = None,
+    ) -> None:
         self._conn = conn
         self._log = log
+        # Optional: the phone-push side effect for whichever delivery lands on
+        # (or escalates to) PHONE_NOTIFICATION. Kept out-of-band rather than
+        # imported here so this module never depends on `push` - most tests
+        # construct a DeliveryTracker with no notifier at all, which is exactly
+        # the previous behaviour.
+        self._on_phone_notify = on_phone_notify
+
+    def _maybe_notify(self, delivery: Delivery) -> None:
+        if self._on_phone_notify is not None and delivery.channel is Channel.PHONE_NOTIFICATION:
+            self._on_phone_notify(delivery)
 
     def send(
         self,
@@ -103,6 +119,7 @@ class DeliveryTracker:
             {"id": delivery.id, "channel": str(channel), "urgency": str(urgency)},
             task_id=task_id,
         )
+        self._maybe_notify(delivery)
         return delivery
 
     def acknowledge(self, delivery_id: str, on: str, now: datetime | None = None) -> None:
@@ -153,7 +170,9 @@ class DeliveryTracker:
             {"id": delivery_id, "channel": str(nxt), "escalated": True},
             task_id=current.task_id,
         )
-        return self.get(delivery_id)
+        updated = self.get(delivery_id)
+        self._maybe_notify(updated)
+        return updated
 
     @staticmethod
     def _to_delivery(row: sqlite3.Row) -> Delivery:

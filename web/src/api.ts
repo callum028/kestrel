@@ -39,6 +39,18 @@ export interface State {
   speech_suppressed: boolean;
 }
 
+// The Kestrel chat - one conversation, shared across every device. Distinct
+// from a Claude chat (raw terminal output, one per session): this is
+// Kestrel's own words, and role is what keeps the two visually apart
+// wherever this renders.
+export interface ConversationMessage {
+  id: number;
+  role: "user" | "kestrel" | "system";
+  text: string;
+  created_at: string;
+  refs: { kind: string; handle: string }[];
+}
+
 // Where the API is depends on how the page was loaded:
 //
 // - Vite dev: same origin, because the dev server proxies. BASE stays empty.
@@ -115,6 +127,29 @@ export const api = {
     json<{ presence: string }>("/clients/signals", {
       method: "POST",
       body: JSON.stringify(body),
+    }),
+
+  conversation: (after = 0) =>
+    json<ConversationMessage[]>(`/conversation/messages?after=${after}&limit=200`),
+
+  sendMessage: (text: string) =>
+    json<Outcome<ConversationMessage>>("/conversation/messages", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+
+  vapidPublicKey: () => json<{ public_key: string }>("/push/vapid-public-key"),
+
+  subscribePush: (subscription: PushSubscriptionJSON) =>
+    json<Outcome>("/push/subscriptions", {
+      method: "POST",
+      body: JSON.stringify(subscription),
+    }),
+
+  unsubscribePush: (endpoint: string) =>
+    json<Outcome>("/push/subscriptions", {
+      method: "DELETE",
+      body: JSON.stringify({ endpoint }),
     }),
 };
 

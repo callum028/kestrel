@@ -17,6 +17,10 @@ dependencies = [
     # Co-located for v0: both halves run in WSL, so the server imports the
     # executor directly. Installed from ../agent with `pip install -e`.
     "kestrel-agent",
+    # Web Push (kestrel.push): VAPID signing + aes128gcm payload encryption.
+    # Both are easy to get subtly wrong by hand; this is the de facto standard
+    # Python implementation of the RFC 8030/8188/8291/8292 stack.
+    "pywebpush>=2.0",
 ]
 
 [project.optional-dependencies]
