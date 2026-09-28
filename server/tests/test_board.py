@@ -85,7 +85,9 @@ async def test_create_page_request_shape(recorder):
 
     ticket = await board.create("Fix the thing", body="do it", lane="To Do", project="kestrel")
 
-    create_req = next(r for r in recorder.requests if r.method == "POST" and r.url.path == "/v1/pages")
+    create_req = next(
+        r for r in recorder.requests if r.method == "POST" and r.url.path == "/v1/pages"
+    )
     assert create_req.headers["authorization"] == "Bearer secret-token"
     assert create_req.headers["notion-version"]
     body = json.loads(create_req.content)
@@ -149,7 +151,9 @@ async def test_query_with_filter_for_changed_since(recorder):
     since = datetime(2026, 9, 1, tzinfo=UTC)
     tickets = await board.changed_since(since)
 
-    query_req = next(r for r in recorder.requests if r.url.path == f"/v1/data_sources/{DATA_SOURCE_ID}/query")
+    query_req = next(
+        r for r in recorder.requests if r.url.path == f"/v1/data_sources/{DATA_SOURCE_ID}/query"
+    )
     body = json.loads(query_req.content)
     assert body["filter"]["timestamp"] == "last_edited_time"
     assert body["filter"]["last_edited_time"]["after"].startswith("2026-09-01")
@@ -162,7 +166,10 @@ async def test_get_reads_body_from_block_children(recorder):
         "GET /v1/blocks/": {
             "results": [
                 {"type": "paragraph", "paragraph": {"rich_text": [{"plain_text": "line one"}]}},
-                {"type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"plain_text": "a point"}]}},
+                {
+                    "type": "bulleted_list_item",
+                    "bulleted_list_item": {"rich_text": [{"plain_text": "a point"}]},
+                },
             ],
             "has_more": False,
             "next_cursor": None,

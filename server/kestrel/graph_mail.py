@@ -93,7 +93,17 @@ class _TextExtractor(HTMLParser):
     `<style>` are dropped, entities are decoded by the base class."""
 
     _BLOCK_TAGS: ClassVar[set[str]] = {
-        "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote",
+        "p",
+        "div",
+        "tr",
+        "li",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "blockquote",
     }
     _SKIP_TAGS: ClassVar[set[str]] = {"script", "style", "head"}
 

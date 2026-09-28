@@ -51,6 +51,27 @@ class BoardConfig:
         )
 
 
+DEFAULT_SERVER_URL = "http://127.0.0.1:8099"
+
+
+def _parse_projects(raw: str | None) -> dict[str, Path]:
+    """`name=path,name2=path2` - deliberately not JSON, so it is one
+    comfortable line in a systemd unit or a `.env` file rather than a quoted
+    blob."""
+    if not raw:
+        return {}
+    projects: dict[str, Path] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        name, _, path = entry.partition("=")
+        if not path:
+            raise ValueError(f"KESTREL_CLAUDE_PROJECTS entry missing '=path': {entry!r}")
+        projects[name.strip()] = Path(path.strip()).expanduser()
+    return projects
+
+
 @dataclass(frozen=True)
 class Config:
     data_dir: Path
@@ -64,6 +85,16 @@ class Config:
     mail_tenant_id: str | None = None
     mail_client_id: str | None = None
     board: BoardConfig = field(default_factory=BoardConfig)
+
+    # Claude Code executor: which repos it may open a worktree in, and how it
+    # invokes the CLI. Empty by default - a Config built by hand (as most
+    # tests do) opts out of the executor entirely rather than needing to know
+    # about it, which is what keeps Runtime.build backward compatible.
+    claude_projects: dict[str, Path] = field(default_factory=dict)
+    claude_worktrees_root: Path | None = None
+    claude_binary: str = "claude"
+    claude_base_args: tuple[str, ...] = ("--dangerously-skip-permissions",)
+    server_url: str = DEFAULT_SERVER_URL
 
     @property
     def token_path(self) -> Path:
@@ -79,9 +110,14 @@ class Config:
         # host is already running, sharing only the data directory with it.
         return default_socket_path(self.data_dir)
 
+    @property
+    def worktrees_root(self) -> Path:
+        return self.claude_worktrees_root or self.data_dir / "worktrees"
+
     @classmethod
     def from_env(cls) -> Config:
         root = Path(os.environ.get("KESTREL_DATA", str(Path.home() / ".kestrel")))
+        worktrees_root = os.environ.get("KESTREL_WORKTREES_ROOT")
         return cls(
             data_dir=root,
             db_path=root / "kestrel.db",
@@ -90,6 +126,10 @@ class Config:
             mail_tenant_id=os.environ.get("KESTREL_MAIL_TENANT_ID"),
             mail_client_id=os.environ.get("KESTREL_MAIL_CLIENT_ID"),
             board=BoardConfig.from_env(),
+            claude_projects=_parse_projects(os.environ.get("KESTREL_CLAUDE_PROJECTS")),
+            claude_worktrees_root=Path(worktrees_root).expanduser() if worktrees_root else None,
+            claude_binary=os.environ.get("KESTREL_CLAUDE_BINARY", "claude"),
+            server_url=os.environ.get("KESTREL_SERVER_URL", DEFAULT_SERVER_URL),
         )
 
     def ensure_dirs(self) -> None:

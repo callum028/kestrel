@@ -14,7 +14,9 @@ from kestrel.mail import (
 _NOW = datetime(2026, 1, 10, tzinfo=UTC)
 
 
-def msg(id, sender="a@example.com", subject="Subject", days_ago=0, body="Body text", attachments=()):
+def msg(
+    id, sender="a@example.com", subject="Subject", days_ago=0, body="Body text", attachments=()
+):
     return MailMessage(
         id=id,
         sender=sender,

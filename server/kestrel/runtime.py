@@ -21,13 +21,15 @@ from .db import Database, connect
 from .delivery import DeliveryTracker
 from .devlock import DevLock
 from .events import EventKind, EventLog
-from .executors import Executor
+from .executors import Executor, ExecutorKind
+from .executors.claude_code import ClaudeCodeConfig, ClaudeCodeExecutor
 from .graph_mail import GraphMailConfig, GraphMailReader
 from .mail import FakeMailReader, MailReader, RecordingMailReader
 from .memory import MemoryStore
 from .observations import ObservationStore
 from .orchestrator import Orchestrator, TickReport
 from .tasks import TaskStore
+from .terminal_activity import HumanActivityTracker
 
 logger = logging.getLogger("kestrel")
 
@@ -72,6 +74,7 @@ class Runtime:
     mail: MailReader
     board: Board
     board_sync: BoardSync
+    human_activity: HumanActivityTracker = field(default_factory=HumanActivityTracker)
     executors: dict[str, Executor] = field(default_factory=dict)
 
     # Latest raw report from whichever client last spoke. Sensors, not beliefs -
@@ -92,6 +95,30 @@ class Runtime:
         tasks = TaskStore(conn, log)
         deliveries = DeliveryTracker(conn, log)
         dev_lock = DevLock(conn)
+        terminals = SessionHostClient(config.session_host_socket)
+        human_activity = HumanActivityTracker()
+
+        # Auto-registered only when the caller hasn't opted to hand its own
+        # executors dict in (tests, mostly) and there is at least one project
+        # configured to run Claude Code against - a bare `Config` built by
+        # hand, as most tests do, has neither and gets the pre-existing empty
+        # dict, unchanged.
+        if executors is None and config.claude_projects:
+            executors = {
+                str(ExecutorKind.CLAUDE_CODE): ClaudeCodeExecutor(
+                    config=ClaudeCodeConfig(
+                        projects=config.claude_projects,
+                        worktrees_root=config.worktrees_root,
+                        server_url=config.server_url,
+                        data_dir=config.data_dir,
+                        claude_binary=config.claude_binary,
+                        claude_base_args=config.claude_base_args,
+                    ),
+                    log=log,
+                    terminals=terminals,
+                    human_activity=human_activity,
+                )
+            }
         executors = executors or {}
         board = board or build_board(config.board)
         return cls(
@@ -104,10 +131,11 @@ class Runtime:
             deliveries=deliveries,
             dev_lock=dev_lock,
             orchestrator=Orchestrator(tasks, log, deliveries, dev_lock, executors),
-            terminals=SessionHostClient(config.session_host_socket),
+            terminals=terminals,
             mail=_build_mail_reader(config, log),
             board=board,
             board_sync=BoardSync(board, tasks, log, conn),
+            human_activity=human_activity,
             executors=executors,
         )
 
@@ -171,7 +199,10 @@ class Runtime:
         now = now or datetime.now(UTC)
         await self.board_sync.push()
         interval = self.config.board.poll_interval_seconds
-        due = self._last_board_poll is None or (now - self._last_board_poll).total_seconds() >= interval
+        due = (
+            self._last_board_poll is None
+            or (now - self._last_board_poll).total_seconds() >= interval
+        )
         if due:
             await self.board_sync.poll(now)
             self._last_board_poll = now

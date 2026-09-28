@@ -382,7 +382,9 @@ class NotionBoard:
                 "timestamp": "last_edited_time",
                 "last_edited_time": {"after": since.astimezone(UTC).isoformat()},
             }
-        body: dict[str, Any] = {"sorts": [{"timestamp": "last_edited_time", "direction": "ascending"}]}
+        body: dict[str, Any] = {
+            "sorts": [{"timestamp": "last_edited_time", "direction": "ascending"}]
+        }
         if filter_:
             body["filter"] = filter_
 
@@ -473,7 +475,9 @@ class FakeBoard:
     async def changed_since(self, since: datetime | None) -> list[Ticket]:
         if since is None:
             return list(self.tickets.values())
-        return [t for t in self.tickets.values() if t.last_edited_time and t.last_edited_time > since]
+        return [
+            t for t in self.tickets.values() if t.last_edited_time and t.last_edited_time > since
+        ]
 
 
 def build_board(config: Any) -> Board:

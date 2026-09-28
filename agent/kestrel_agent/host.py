@@ -144,6 +144,7 @@ class _Connection:
                     task_id=message.get("task_id"),
                     rows=message.get("rows", 40),
                     cols=message.get("cols", 120),
+                    env=message.get("env"),
                 )
                 await self._reply_ok(req_id, _descriptor(terminal))
             elif op == "list":

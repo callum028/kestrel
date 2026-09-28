@@ -219,7 +219,11 @@ class BoardSync:
                 continue
 
             previous = self._sync_row(ticket.id)
-            if previous is not None and previous[0] == ticket.lane and previous[1] == ticket.flagged:
+            if (
+                previous is not None
+                and previous[0] == ticket.lane
+                and previous[1] == ticket.flagged
+            ):
                 continue  # exactly what Kestrel last wrote - not a manual move
 
             self._record_push(ticket.id, task.id, ticket.lane, ticket.flagged)
@@ -230,7 +234,11 @@ class BoardSync:
             self._log.append(
                 EventKind.BOARD_INSTRUCTION,
                 "board",
-                {"ticket_id": ticket.id, "from": previous[0] if previous else None, "to": ticket.lane},
+                {
+                    "ticket_id": ticket.id,
+                    "from": previous[0] if previous else None,
+                    "to": ticket.lane,
+                },
                 task_id=task.id,
             )
             self._apply_instruction(task.id, ticket.lane)
@@ -252,7 +260,9 @@ class BoardSync:
 
         try:
             if lane == done_lane and task.state is not TaskState.DONE:
-                self._tasks.transition(task_id, TaskState.DONE, actor="board", reason="moved to Done")
+                self._tasks.transition(
+                    task_id, TaskState.DONE, actor="board", reason="moved to Done"
+                )
             elif lane == queued_lane and task.state not in (
                 TaskState.CREATED,
                 TaskState.BRIEFED,
