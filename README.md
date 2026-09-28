@@ -45,6 +45,29 @@ They talk over a Unix domain socket at `$KESTREL_DATA/session-host.sock` (`~/.ke
 the processes behind it — that is the point of the split. If the server can't reach the socket, its
 `/terminals` endpoints report `"status": "unavailable"` rather than an empty list.
 
+### Mail (Microsoft Graph)
+
+Read-only, read on request only — see docs/design.md §4.4/§4.5 and §11 for why. One-time setup:
+
+1. In Entra ID: **App registrations → New registration** — single tenant, no redirect URI needed.
+2. **Authentication → Advanced settings → Allow public client flows** = Yes (device code needs a
+   public client; there is deliberately no client secret to leak).
+3. **API permissions → Add a permission → Microsoft Graph → Delegated** → add `Mail.Read` and
+   `offline_access` → **Grant admin consent** (Callum is effectively the tenant admin here).
+4. Copy the **Directory (tenant) ID** and **Application (client) ID** from the registration's
+   Overview page.
+5. Set `KESTREL_MAIL_TENANT_ID` and `KESTREL_MAIL_CLIENT_ID` in the environment, then run:
+   ```sh
+   python -m kestrel.mail_auth --tenant-id <tenant> --client-id <client>
+   ```
+   This opens a device-code sign-in (visit a URL, type a short code) and stores a refresh token at
+   `$KESTREL_DATA/mail_token`, `0600`. `GraphMailReader` refreshes access tokens on its own after
+   that — this command is only needed again if the token is revoked.
+
+Without those two environment variables and a stored token, `Runtime` falls back to
+`kestrel.mail.FakeMailReader` and logs a warning saying so — Kestrel still starts, just against
+placeholder mail.
+
 ## Status
 
 Core server (tasks, attention, memory, events), the session host, and the web terminal exist and are

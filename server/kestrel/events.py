@@ -54,6 +54,12 @@ class EventKind(StrEnum):
     MESSAGE_DELIVERED = "channel.delivered"
     MESSAGE_ACKNOWLEDGED = "channel.acknowledged"
 
+    # Mail - read-only, only on request. Every read is recorded here (what was
+    # read, never the body), which is the audit trail for a capability whose
+    # whole risk surface is "what did Kestrel look at".
+    MAIL_LISTED = "mail.listed"
+    MAIL_READ = "mail.read"
+
     # System. A failing tick is recorded rather than swallowed - an assistant
     # that dies quietly is worse than one that reports a bad pass.
     TICK_FAILED = "system.tick_failed"
