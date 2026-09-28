@@ -78,6 +78,27 @@ def test_sw_js_is_never_cached(anon):
     assert response.headers["cache-control"] == "no-cache"
 
 
+def test_sw_js_is_served_with_an_explicit_javascript_content_type(anon):
+    """A browser refuses to register a service worker whose script isn't
+    served with a JS MIME type - Chrome's generic "An unknown error occurred
+    when fetching the script" is the most common symptom. `FileResponse`'s
+    default (`mimetypes.guess_type`) depends on the host's own mime.types,
+    which is exactly the kind of thing that can differ between a dev machine
+    and a minimal Pi image - so this is pinned explicitly rather than
+    trusted, and this test locks in that it's pinned to something a browser
+    actually accepts."""
+    response = anon.get("/sw.js")
+    assert response.headers["content-type"].split(";")[0].strip() == "text/javascript"
+
+
+def test_a_built_asset_is_served_with_an_explicit_javascript_content_type(anon):
+    """Same reasoning as sw.js, for the app's own module bundle under
+    /assets - a wrong MIME type there breaks `<script type="module">`
+    loading the same way."""
+    response = anon.get("/assets/app.abc123.js")
+    assert response.headers["content-type"].split(";")[0].strip() == "text/javascript"
+
+
 def test_manifest_is_served_without_a_token(anon):
     response = anon.get("/manifest.webmanifest")
     assert response.status_code == 200
