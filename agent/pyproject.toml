@@ -8,6 +8,10 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5"]
 
+[project.scripts]
+# The session host: started once, left running, independent of the server.
+kestrel-session-host = "kestrel_agent.__main__:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

@@ -9,7 +9,7 @@ from kestrel.runtime import Runtime
 
 
 @pytest.fixture
-def client(tmp_path):
+def client(tmp_path, session_host):
     config = Config(
         data_dir=tmp_path,
         db_path=tmp_path / "kestrel.db",
@@ -21,7 +21,10 @@ def client(tmp_path):
     with TestClient(app, headers={"Authorization": f"Bearer {app.state.token}"}) as c:
         c.token = app.state.token  # type: ignore[attr-defined]
         yield c
-    rt.terminals.close_all()
+    # No explicit close_all here: every terminal is a real process under the
+    # session_host subprocess, and that fixture's own teardown (SIGTERM to the
+    # host) makes it close everything it holds - the same graceful shutdown a
+    # real deploy relies on.
 
 
 def ws_url(client, terminal_id: str) -> str:
@@ -42,6 +45,27 @@ def read_until(ws, needle: str, limit: int = 60) -> str:
         if needle in buffer:
             break
     return buffer
+
+
+def test_opening_a_terminal_without_a_session_host_running_says_so(tmp_path):
+    """No host listening must look like the outage it is, never like "zero
+    terminals" - a silent empty list here would be exactly the kind of
+    invisible failure the project rules out."""
+    config = Config(
+        data_dir=tmp_path,
+        db_path=tmp_path / "kestrel.db",
+        memory_repo=tmp_path / "memory",
+        identity_dir=tmp_path / "identity",
+    )
+    rt = Runtime.build(config)
+    app = create_app(runtime=rt)
+    with TestClient(app, headers={"Authorization": f"Bearer {app.state.token}"}) as c:
+        body = c.post("/terminals", json={"cwd": str(tmp_path)}).json()
+        assert body["status"] == "unavailable"
+        assert "session host" in body["reason"]
+
+        body = c.get("/terminals").json()
+        assert body["status"] == "unavailable"
 
 
 def test_opening_a_terminal_in_a_missing_directory_says_so(client, tmp_path):

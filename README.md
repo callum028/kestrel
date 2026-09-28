@@ -14,7 +14,7 @@ boundaries. Implementation detail lives in code, not there.
 | | |
 |---|---|
 | `server/` | The Kestrel service. Runs on the always-on host (Pi). Owns all durable state. |
-| `agent/` | PC-side executor. Runs inside WSL, spawned over stdio. Git worktrees, Claude Code sessions, validation. |
+| `agent/` | The session host and executor. Owns every PTY (`python -m kestrel_agent`), long-lived and independent of the server — git worktrees, Claude Code sessions, validation. |
 | `host/` | Small Windows process. Owns the tailnet link, tray, notifications, window focus, idle time. |
 | `web/` | Desktop UI. Chat, task panes, embedded terminal. |
 | `android/` | Phone client. Activation, calls, notifications. |
@@ -29,6 +29,21 @@ Two checkouts of this repo:
 - **Windows** — anything that must build natively.
 
 Pi access: `ssh callum028@kestrel-pi` (key lives in WSL, not Windows).
+
+### Running it
+
+Two processes, started separately, in either order — the server is a client of the session host,
+never its parent:
+
+```sh
+python -m kestrel_agent            # the session host: owns every PTY, start it first and leave it running
+uvicorn kestrel.api:create_app --factory --reload   # the server: proxies terminal calls over a Unix socket
+```
+
+They talk over a Unix domain socket at `$KESTREL_DATA/session-host.sock` (`~/.kestrel` by default),
+`0600`, created by the session host. Restarting or redeploying the server never touches this socket or
+the processes behind it — that is the point of the split. If the server can't reach the socket, its
+`/terminals` endpoints report `"status": "unavailable"` rather than an empty list.
 
 ## Status
 

@@ -10,7 +10,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from kestrel_agent.terminals import TerminalManager
+from kestrel_agent.host_client import SessionHostClient
 
 from .attention import AttentionState, Signals, compute
 from .config import Config
@@ -38,7 +38,7 @@ class Runtime:
     deliveries: DeliveryTracker
     dev_lock: DevLock
     orchestrator: Orchestrator
-    terminals: TerminalManager
+    terminals: SessionHostClient
     executors: dict[str, Executor] = field(default_factory=dict)
 
     # Latest raw report from whichever client last spoke. Sensors, not beliefs -
@@ -64,7 +64,7 @@ class Runtime:
             deliveries=deliveries,
             dev_lock=dev_lock,
             orchestrator=Orchestrator(tasks, log, deliveries, dev_lock, executors),
-            terminals=TerminalManager(),
+            terminals=SessionHostClient(config.session_host_socket),
             executors=executors,
         )
 

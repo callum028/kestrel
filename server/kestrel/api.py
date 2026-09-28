@@ -24,6 +24,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from kestrel_agent.host_client import SessionHostUnavailable
 from pydantic import BaseModel, Field
 
 from .attention import Focus, Signals
@@ -128,6 +129,10 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
             yield
         finally:
             ticker.cancel()
+            # Only this process's connection - the session host and every
+            # terminal it holds keep running past this point, which is the
+            # entire point of hosting them elsewhere.
+            await rt.terminals.disconnect()
 
     app = FastAPI(title="Kestrel", lifespan=lifespan)
     app.state.runtime = rt
@@ -323,10 +328,15 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
     # --- terminals ----------------------------------------------------------
     # Terminals are a first-class surface, not a session viewer: N of them, some
     # bound to a task and its worktree, some just a shell in a directory. The
-    # PTY lives in the agent, so closing a client never kills the work.
+    # PTY lives in the session host, a separate long-lived process, so neither
+    # a client leaving nor the server itself restarting kills the work. Every
+    # call below is a round trip to that process, so all of them are async now.
 
-    # These two must be async: they attach and detach an event-loop reader, and
-    # FastAPI runs sync endpoints in a threadpool where there is no running loop.
+    def _unavailable(exc: SessionHostUnavailable) -> dict[str, Any]:
+        # A missing session host is not "no terminals" - it is a different,
+        # more serious thing, and it must not look the same as an empty list.
+        return {"status": "unavailable", "reason": str(exc)}
+
     @app.post("/terminals")
     async def open_terminal(body: TerminalIn) -> dict[str, Any]:
         task_id = None
@@ -342,9 +352,12 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
         cwd = Path(body.cwd).expanduser()
         if not cwd.is_dir():
             return {"status": "not_found", "searched_for": str(cwd), "looked_in": "filesystem"}
-        terminal = rt.terminals.create(
-            cwd=cwd, command=body.command, task_id=task_id, rows=body.rows, cols=body.cols
-        )
+        try:
+            terminal = await rt.terminals.create(
+                cwd=cwd, command=body.command, task_id=task_id, rows=body.rows, cols=body.cols
+            )
+        except SessionHostUnavailable as exc:
+            return _unavailable(exc)
         return {
             "status": "ok",
             "id": terminal.id,
@@ -353,7 +366,11 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
         }
 
     @app.get("/terminals")
-    def list_terminals() -> list[dict[str, Any]]:
+    async def list_terminals() -> list[dict[str, Any]] | dict[str, Any]:
+        try:
+            terminals = await rt.terminals.list()
+        except SessionHostUnavailable as exc:
+            return _unavailable(exc)
         return [
             {
                 "id": t.id,
@@ -362,12 +379,16 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
                 "alive": t.alive,
                 "command": t.command,
             }
-            for t in rt.terminals.list()
+            for t in terminals
         ]
 
     @app.delete("/terminals/{terminal_id}")
     async def close_terminal(terminal_id: str) -> dict[str, Any]:
-        if not rt.terminals.close(terminal_id):
+        try:
+            closed = await rt.terminals.close(terminal_id)
+        except SessionHostUnavailable as exc:
+            return _unavailable(exc)
+        if not closed:
             return {"status": "not_found", "searched_for": terminal_id, "looked_in": "terminals"}
         return {"status": "ok"}
 
@@ -379,13 +400,17 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
             await websocket.close(code=4401, reason="bad or missing token")
             return
 
-        terminal = rt.terminals.get(terminal_id)
+        try:
+            terminal = await rt.terminals.get(terminal_id)
+        except SessionHostUnavailable as exc:
+            await websocket.close(code=4503, reason=str(exc)[:120])
+            return
         if terminal is None:
             await websocket.close(code=4404, reason="no such terminal")
             return
 
         await websocket.accept()
-        queue = terminal.subscribe()
+        queue = await terminal.subscribe()
 
         async def pump_out() -> None:
             while True:
@@ -401,15 +426,15 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
                 if message.get("type") == "input":
                     await terminal.write(message["data"].encode())
                 elif message.get("type") == "resize":
-                    terminal.resize(int(message["rows"]), int(message["cols"]))
+                    await terminal.resize(int(message["rows"]), int(message["cols"]))
 
         try:
             await asyncio.gather(pump_out(), pump_in())
-        except WebSocketDisconnect:
+        except (WebSocketDisconnect, SessionHostUnavailable):
             pass
         finally:
             # The client goes; the session stays. That is the whole point.
-            terminal.unsubscribe(queue)
+            await terminal.unsubscribe(queue)
 
     @app.post("/tick")
     async def tick() -> dict[str, Any]:
