@@ -3,6 +3,7 @@ import {
   api,
   clearToken,
   hasToken,
+  setOnOriginRejected,
   setOnTokenRejected,
   setToken,
   type TerminalInfo,
@@ -53,18 +54,30 @@ type AuthPhase = "checking" | "authed" | "unauthed";
 
 /** The token gate: resolves a `#pair=` fragment (if present) against the
  * server *before* trusting it, strips it from the URL regardless of outcome,
- * and re-opens the gate on any later 401/403 (a stored token the server no
+ * and re-opens the gate on any later 401 (a stored token the server no
  * longer accepts, e.g. after a rotation - `api.ts`'s `onTokenRejected`) so
- * that always reads as "go pair again", never a silent, permanent failure. */
+ * that always reads as "go pair again", never a silent, permanent failure.
+ *
+ * A 403 is deliberately *not* wired to this gate - "origin not allowed"
+ * means the token is fine and the server's allowlist is what's wrong
+ * (`onOriginRejected`, surfaced as a banner over whatever's already on
+ * screen, authed or not - see `originError` below and `OriginErrorBanner`).
+ * Treating a 403 like a 401 was the bug: it unpaired a device whose token
+ * was never actually rejected, over a problem re-pairing can't fix. */
 function useAuthPhase() {
   const [phase, setPhase] = useState<AuthPhase>(() =>
     readPairingFragment() ? "checking" : hasToken() ? "authed" : "unauthed",
   );
   const [pairError, setPairError] = useState<string | null>(null);
+  const [originError, setOriginError] = useState<string | null>(null);
 
   useEffect(() => {
     setOnTokenRejected(() => setPhase("unauthed"));
-    return () => setOnTokenRejected(null);
+    setOnOriginRejected((message) => setOriginError(message));
+    return () => {
+      setOnTokenRejected(null);
+      setOnOriginRejected(null);
+    };
   }, []);
 
   useEffect(() => {
@@ -73,13 +86,16 @@ function useAuthPhase() {
     // Stripped immediately, before validation resolves - a failed pairing
     // attempt must not leave the token sitting in browser history either.
     window.history.replaceState(null, "", location.pathname + location.search);
-    validateToken(candidate).then((ok) => {
-      if (ok) {
+    validateToken(candidate).then((result) => {
+      if (result.ok) {
         setToken(candidate);
         setPairError(null);
         setPhase("authed");
       } else {
-        setPairError("That pairing link was rejected - it may be stale. Ask for a fresh one.");
+        setPairError(
+          result.originRejected ??
+            "That pairing link was rejected - it may be stale. Ask for a fresh one.",
+        );
         setPhase("unauthed");
       }
     });
@@ -87,13 +103,13 @@ function useAuthPhase() {
 
   const submitToken = useCallback(async (candidate: string) => {
     setPhase("checking");
-    const ok = await validateToken(candidate);
-    if (ok) {
+    const result = await validateToken(candidate);
+    if (result.ok) {
       setToken(candidate);
       setPairError(null);
       setPhase("authed");
     } else {
-      setPairError("That token was rejected.");
+      setPairError(result.originRejected ?? "That token was rejected.");
       setPhase("unauthed");
     }
   }, []);
@@ -103,16 +119,20 @@ function useAuthPhase() {
     setPhase("unauthed");
   }, []);
 
-  return { phase, pairError, submitToken, unpair };
+  return { phase, pairError, originError, dismissOriginError: () => setOriginError(null), submitToken, unpair };
 }
 
 export default function App() {
   // The token check has to happen *outside* the component holding the hooks.
   // An early return inside it does not stop effects - React still runs them -
   // so a tokenless window sat there issuing a 401 every three seconds.
-  const { phase, pairError, submitToken, unpair } = useAuthPhase();
+  const { phase, pairError, originError, dismissOriginError, submitToken, unpair } = useAuthPhase();
   if (phase === "checking") return <Pairing />;
-  return phase === "authed" ? <Shell onUnpair={unpair} /> : <NoToken error={pairError} onSubmit={submitToken} />;
+  return phase === "authed" ? (
+    <Shell onUnpair={unpair} originError={originError} onDismissOriginError={dismissOriginError} />
+  ) : (
+    <NoToken error={pairError ?? originError} onSubmit={submitToken} />
+  );
 }
 
 function Pairing() {
@@ -186,6 +206,34 @@ function OfflineBanner({ reachable }: { reachable: boolean }) {
   return <div className="offline-banner">Can't reach Kestrel. Retrying…</div>;
 }
 
+function OriginErrorBanner({
+  message,
+  onDismiss,
+}: {
+  message: string | null;
+  onDismiss: () => void;
+}) {
+  // Distinct from OfflineBanner on purpose: this is not "can't reach the
+  // server" (the server answered, and clearly - with a 403), it is "the
+  // server doesn't trust the address this page is being served from", which
+  // needs a fix on the server side, not a retry. Dismissible, since it's a
+  // config problem the user may already be mid-fix on, not an ongoing state
+  // like reachability.
+  if (!message) return null;
+  return (
+    <div className="offline-banner" style={{ background: "var(--warn)" }}>
+      {message}
+      <button
+        type="button"
+        onClick={onDismiss}
+        style={{ marginLeft: 12, background: "none", border: "none", cursor: "pointer" }}
+      >
+        Dismiss
+      </button>
+    </div>
+  );
+}
+
 function UnpairControl({ onUnpair }: { onUnpair: () => void }) {
   // Deliberately unobtrusive - unpairing is rare and destructive enough
   // (this device stops being able to reach Kestrel at all until paired
@@ -213,7 +261,15 @@ function UnpairControl({ onUnpair }: { onUnpair: () => void }) {
   );
 }
 
-function Shell({ onUnpair }: { onUnpair: () => void }) {
+function Shell({
+  onUnpair,
+  originError,
+  onDismissOriginError,
+}: {
+  onUnpair: () => void;
+  originError: string | null;
+  onDismissOriginError: () => void;
+}) {
   const isPhone = useMediaQuery(PHONE_QUERY);
   const data = useKestrelData();
   const focusDeliveryId = useDeepLinkedDelivery();
@@ -221,6 +277,7 @@ function Shell({ onUnpair }: { onUnpair: () => void }) {
   return (
     <>
       <UnpairControl onUnpair={onUnpair} />
+      <OriginErrorBanner message={originError} onDismiss={onDismissOriginError} />
       <OfflineBanner reachable={data.reachable} />
       {isPhone ? (
         <PhoneWorkspace

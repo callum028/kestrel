@@ -176,31 +176,74 @@ export function clearToken(): void {
   }
 }
 
+export interface ValidateResult {
+  ok: boolean;
+  /** Set on a 403 specifically - "the token would work, but this origin
+   * isn't allowed" - as opposed to a 401 or a network failure, both of
+   * which just mean "no, try a different token/link". Lets the pairing UI
+   * say the actually-true thing instead of "that link was rejected" for a
+   * problem a fresh link can't fix. */
+  originRejected?: string;
+}
+
 /** Checks a candidate token against a real endpoint before it's ever stored -
  * a mistyped paste or a stale pairing link must never make it into
  * localStorage looking valid. `/pair/validate` requires no state of its own;
- * any authenticated endpoint would do, this one just names the purpose. */
-export async function validateToken(candidate: string): Promise<boolean> {
+ * any authenticated endpoint would do, this one just names the purpose.
+ * Deliberately bypasses `json()`/`onOriginRejected` above: a candidate that
+ * hasn't been trusted yet must never trigger the same global "show an error
+ * banner over the app" path a rejected *stored* token does. */
+export async function validateToken(candidate: string): Promise<ValidateResult> {
   try {
     const response = await fetch(`${BASE}/pair/validate`, {
       headers: { Authorization: `Bearer ${candidate}` },
     });
-    return response.ok;
+    if (response.ok) return { ok: true };
+    if (response.status === 403) {
+      const reason = (await readReason(response)) ?? "origin not allowed";
+      return { ok: false, originRejected: `${reason} - set KESTREL_ALLOWED_ORIGINS on the server.` };
+    }
+    return { ok: false };
   } catch {
-    return false;
+    return { ok: false };
   }
 }
 
-// Set by App.tsx's auth gate. A 401/403 on *any* call - not just pairing's
-// own validation - means the stored token was rejected (typically a
+// Set by App.tsx's auth gate. A 401 on *any* call - not just pairing's own
+// validation - means the stored token itself was rejected (typically a
 // rotation on the server, e.g. after `~/.kestrel/token` was restored from
 // backup) and the device needs to be re-paired rather than quietly failing
 // forever. See docs/design.md §11a's "can't reach Kestrel" table, which this
-// is deliberately distinct from - a 401/403 is "wrong token", not "no
-// server".
+// is deliberately distinct from - a 401 is "wrong token", not "no server".
+//
+// A 403, below, is a *different* fact - "this token would work, but the
+// server doesn't recognise the origin it arrived from" - and must not be
+// treated the same way: unpairing over it would throw away a perfectly good
+// token and send the user back to a pairing screen that can't fix the real
+// problem (a missing/wrong KESTREL_ALLOWED_ORIGINS on the server). See
+// `setOnOriginRejected`.
 let onTokenRejected: (() => void) | null = null;
 export function setOnTokenRejected(callback: (() => void) | null): void {
   onTokenRejected = callback;
+}
+
+/** Called on a 403 - "origin not allowed" - with the server's own reason
+ * text appended to a hint about the fix. Distinct from `onTokenRejected`:
+ * this is a visible error banner, not a trip back to the pairing screen -
+ * the stored token is fine, the server's origin allowlist is what needs
+ * attention (docs/design.md §11a). */
+let onOriginRejected: ((message: string) => void) | null = null;
+export function setOnOriginRejected(callback: ((message: string) => void) | null): void {
+  onOriginRejected = callback;
+}
+
+async function readReason(response: Response): Promise<string | null> {
+  try {
+    const body = (await response.json()) as { reason?: unknown };
+    return typeof body.reason === "string" ? body.reason : null;
+  } catch {
+    return null;
+  }
 }
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
@@ -208,10 +251,15 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
   if (init?.body) headers["Content-Type"] = "application/json";
 
   const response = await fetch(`${BASE}${path}`, { ...init, headers });
-  if (response.status === 401 || response.status === 403) {
+  if (response.status === 401) {
     clearToken();
     onTokenRejected?.();
-    throw new Error(`${path} → ${response.status}: token rejected`);
+    throw new Error(`${path} → 401: token rejected`);
+  }
+  if (response.status === 403) {
+    const reason = (await readReason(response)) ?? "origin not allowed";
+    onOriginRejected?.(`${reason} - set KESTREL_ALLOWED_ORIGINS on the server.`);
+    throw new Error(`${path} → 403: ${reason}`);
   }
   if (!response.ok) throw new Error(`${init?.method ?? "GET"} ${path} → ${response.status}`);
   return response.json() as Promise<T>;

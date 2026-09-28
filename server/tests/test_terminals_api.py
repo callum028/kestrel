@@ -233,3 +233,96 @@ def test_a_websocket_from_an_unconfigured_origin_is_still_refused(tailnet_client
         ) as ws,
     ):
         ws.receive_text()
+
+
+def test_a_direct_same_origin_websocket_needs_no_config(client, tmp_path):
+    """The orchestrator's exact repro, for the websocket path: a browser at
+    http://localhost:8099 with nothing in front of it at all sends
+    `Origin: http://localhost:8099` on the upgrade, matching `Host` - no
+    KESTREL_ALLOWED_ORIGINS needed."""
+    opened = client.post(
+        "/terminals", json={"cwd": str(tmp_path), "command": ["/bin/bash", "--norc", "-i"]}
+    ).json()
+
+    with client.websocket_connect(
+        ws_url(client, opened["id"]),
+        headers={"Host": "localhost:8099", "Origin": "http://localhost:8099"},
+    ) as ws:
+        ws.send_json({"type": "input", "data": "echo direct-same-origin\n"})
+        assert "direct-same-origin" in read_until(ws, "direct-same-origin")
+
+
+def test_a_websocket_from_the_forwarded_tailnet_origin_is_accepted_from_a_loopback_peer(
+    tmp_path, session_host
+):
+    """No KESTREL_ALLOWED_ORIGINS at all here - `tailscale serve` terminates
+    TLS at the tailnet hostname and forwards plain HTTP to this loopback
+    port, so X-Forwarded-Proto/-Host is the only way the server learns the
+    origin it was actually reached at. Trusted here specifically because the
+    TCP peer handing them over is loopback."""
+    config = Config(
+        data_dir=tmp_path,
+        db_path=tmp_path / "kestrel.db",
+        memory_repo=tmp_path / "memory",
+        identity_dir=tmp_path / "identity",
+    )
+    rt = Runtime.build(config)
+    app = create_app(runtime=rt)
+    with TestClient(
+        app, headers={"Authorization": f"Bearer {app.state.token}"}, client=("127.0.0.1", 22222)
+    ) as c:
+        opened = c.post(
+            "/terminals", json={"cwd": str(tmp_path), "command": ["/bin/bash", "--norc", "-i"]}
+        ).json()
+        with c.websocket_connect(
+            f"/terminals/{opened['id']}/ws?token={app.state.token}",
+            headers={
+                "Host": "127.0.0.1:8099",
+                "Origin": TAILNET_ORIGIN,
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "kestrel-pi.tailnet-1234.ts.net",
+            },
+        ) as ws:
+            ws.send_json({"type": "input", "data": "echo via-loopback-proxy\n"})
+            assert "via-loopback-proxy" in read_until(ws, "via-loopback-proxy")
+
+
+def test_forwarded_headers_from_a_non_loopback_peer_are_ignored(tmp_path, session_host):
+    """The one thing that must never work: a caller that isn't this machine
+    forging X-Forwarded-* to pass itself off as the tailnet origin. Nothing
+    but loopback can reach this port at all in reality (it's bound to
+    127.0.0.1) - this is defence in depth against a future misconfiguration."""
+    config = Config(
+        data_dir=tmp_path,
+        db_path=tmp_path / "kestrel.db",
+        memory_repo=tmp_path / "memory",
+        identity_dir=tmp_path / "identity",
+    )
+    rt = Runtime.build(config)
+    app = create_app(runtime=rt)
+    with TestClient(
+        app, headers={"Authorization": f"Bearer {app.state.token}"}, client=("127.0.0.1", 22222)
+    ) as c:
+        opened = c.post(
+            "/terminals", json={"cwd": str(tmp_path), "command": ["/bin/bash", "--norc", "-i"]}
+        ).json()
+
+    # starlette raises on the 4401 close rather than yielding a socket
+    with (
+        TestClient(
+            app,
+            headers={"Authorization": f"Bearer {app.state.token}"},
+            client=("198.51.100.9", 33333),
+        ) as remote,
+        pytest.raises(Exception),  # noqa: B017
+        remote.websocket_connect(
+            f"/terminals/{opened['id']}/ws?token={app.state.token}",
+            headers={
+                "Host": "127.0.0.1:8099",
+                "Origin": TAILNET_ORIGIN,
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "kestrel-pi.tailnet-1234.ts.net",
+            },
+        ) as ws,
+    ):
+        ws.receive_text()
