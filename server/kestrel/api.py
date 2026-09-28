@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,9 +28,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from kestrel_agent.host_client import SessionHostUnavailable
 from pydantic import BaseModel, Field
+from starlette.routing import Match
 
 from .attention import Focus, Signals
-from .auth import ALLOWED_ORIGINS, check_request, check_websocket, load_or_create_token
+from .auth import check_request, check_websocket, load_or_create_token
 from .config import Config
 from .events import EventKind
 from .mail import render_untrusted
@@ -39,6 +41,22 @@ from .outcomes import Refused
 from .runtime import Runtime
 from .tasks import IllegalTransition, TaskState
 from .waits import WaitKind
+from .web_static import mount_web_app
+
+logger = logging.getLogger("kestrel.api")
+
+
+def _matches_a_registered_route(request: Request, routes: list) -> bool:
+    """True once `request` fully matches one of `routes` - used to tell an
+    actual API call apart from a path the static SPA catch-all will handle,
+    without hardcoding a list of "looks static" prefixes (see
+    web_static.py's docstring on why that would be the wrong kind of
+    allowlist)."""
+    for route in routes:
+        match, _ = route.matches(request.scope)
+        if match == Match.FULL:
+            return True
+    return False
 
 
 class SignalsIn(BaseModel):
@@ -226,6 +244,17 @@ def _tool_signature(hook: HookIn) -> str:
 def create_app(config: Config | None = None, runtime: Runtime | None = None) -> FastAPI:
     rt = runtime or Runtime.build(config or Config.from_env())
     token = load_or_create_token(rt.config.token_path)
+    # Decided once, up front - both the auth exemption below and the mount
+    # call at the bottom of this function need the same answer to "is there
+    # actually a built app to serve" (see web_static.py's docstring on why
+    # the exemption exists at all).
+    web_dist_dir = rt.config.web_dist_dir
+    serving_web = web_dist_dir is not None and web_dist_dir.is_dir()
+    # Populated once every API route below is registered (just before the
+    # static app is mounted) - a request only skips the token check once it
+    # has already failed to match anything in this list. See
+    # `_matches_a_registered_route`.
+    api_routes: list = []
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -258,8 +287,22 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
         # and only for origins on the allowlist.
         if request.method == "OPTIONS":
             return await call_next(request)
+        # The static app shell (index.html, sw.js, the manifest, hashed
+        # asset files, and the SPA's own client-side routes) is not a secret
+        # and a browser's own navigation to it cannot carry an Authorization
+        # header - see web_static.py. This only exempts a `GET` that does
+        # not match any real API route below (checked against `api_routes`,
+        # a snapshot taken before the SPA catch-all is mounted), so every
+        # actual API path - including its `GET` ones - still requires the
+        # token exactly as before.
+        if (
+            serving_web
+            and request.method == "GET"
+            and not _matches_a_registered_route(request, api_routes)
+        ):
+            return await call_next(request)
         try:
-            check_request(request, token)
+            check_request(request, token, rt.config.allowed_origins)
         except HTTPException as exc:
             return JSONResponse(
                 {"status": "refused", "reason": exc.detail}, status_code=exc.status_code
@@ -271,7 +314,7 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
     # another origin, which makes every call cross-origin.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=sorted(ALLOWED_ORIGINS),
+        allow_origins=sorted(rt.config.allowed_origins),
         allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=["authorization", "content-type"],
         # No cookies anywhere in this system, deliberately: the token is a
@@ -609,7 +652,7 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
     async def terminal_ws(websocket: WebSocket, terminal_id: str) -> None:
         # Middleware does not run for websockets, so this is checked here or
         # not at all - and this is the endpoint that carries keystrokes.
-        if not check_websocket(websocket, token):
+        if not check_websocket(websocket, token, rt.config.allowed_origins):
             await websocket.close(code=4401, reason="bad or missing token")
             return
 
@@ -929,5 +972,37 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
             fact=body.rule, category="rule", source=Source.EXPLICIT, scope=body.scope, core=True
         )
         return {"status": "ok", "id": entry.id}
+
+    # --- pairing --------------------------------------------------------------
+    # What the web app's pairing flow (App.tsx, on reading `#pair=<token>`)
+    # calls before it trusts a token enough to store it in localStorage - see
+    # kestrel.pair for the CLI that prints the link. This is deliberately
+    # nothing more than "does the global token middleware accept this
+    # request" made explicit: the token in the fragment either is the one
+    # true token or it isn't, and the middleware above already answers that
+    # for every route. A dedicated route just gives the client something
+    # named for the purpose, and something to call that isn't shaped like a
+    # side effect.
+    @app.get("/pair/validate")
+    def pair_validate() -> dict[str, Any]:
+        return {"status": "ok"}
+
+    # --- static web app ---------------------------------------------------------
+    # See web_static.py: `web/dist`, so the same tailnet URL `tailscale
+    # serve` fronts (docs/design.md §11a) both serves the API and can be
+    # installed as a PWA - added last so it never shadows an API route above.
+    # The snapshot below is what `require_token`'s auth exemption checks
+    # against - it has to be taken here, after every `@app.get`/`@app.post`/
+    # `@app.websocket` call above and before the SPA catch-all is mounted,
+    # or the catch-all would be in it and defeat the whole point.
+    api_routes.extend(app.routes)
+    if serving_web:
+        mount_web_app(app, web_dist_dir)
+    else:
+        logger.info(
+            "web: no built app found at %s - serving API routes only "
+            "(run `npm run build` in web/, or set KESTREL_WEB_DIST)",
+            web_dist_dir,
+        )
 
     return app

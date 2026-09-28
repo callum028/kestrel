@@ -30,8 +30,12 @@ from pathlib import Path
 from fastapi import HTTPException, Request, WebSocket, status
 
 # Where a legitimate client can be running. Anything else is a page that found
-# its way to the port.
-ALLOWED_ORIGINS = frozenset(
+# its way to the port. This is the dev/Tauri set; a deployment reachable at a
+# tailnet URL (via `tailscale serve`) adds to it through
+# `KESTREL_ALLOWED_ORIGINS` (see `parse_allowed_origins` and
+# `config.Config.allowed_origins`) rather than editing this file - the rule
+# itself (unrecognised origin -> refused) never changes.
+DEFAULT_ALLOWED_ORIGINS = frozenset(
     {
         "http://localhost:5173",  # vite dev
         "http://127.0.0.1:5173",
@@ -40,6 +44,16 @@ ALLOWED_ORIGINS = frozenset(
         "http://tauri.localhost",  # tauri production (windows webview2)
     }
 )
+
+
+def parse_allowed_origins(extra: str | None) -> frozenset[str]:
+    """`KESTREL_ALLOWED_ORIGINS` is a comma-separated list of additional
+    origins - typically the one `https://<host>.<tailnet>.ts.net` URL
+    `tailscale serve` fronts the app at. Always additive to the dev/Tauri
+    defaults, never a replacement: there is no way to configure this that
+    reopens loopback dev access by accident."""
+    extra_origins = {o.strip() for o in (extra or "").split(",") if o.strip()}
+    return DEFAULT_ALLOWED_ORIGINS | frozenset(extra_origins)
 
 
 def load_or_create_token(path: Path) -> str:
@@ -58,9 +72,11 @@ def _matches(supplied: str | None, expected: str) -> bool:
     return supplied is not None and hmac.compare_digest(supplied, expected)
 
 
-def check_request(request: Request, token: str) -> None:
+def check_request(
+    request: Request, token: str, origins: frozenset[str] = DEFAULT_ALLOWED_ORIGINS
+) -> None:
     origin = request.headers.get("origin")
-    if origin is not None and origin not in ALLOWED_ORIGINS:
+    if origin is not None and origin not in origins:
         # A same-origin or non-browser caller sends no Origin at all; a browser
         # always does. So an unrecognised one is a page, not a client.
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"origin not allowed: {origin}")
@@ -71,8 +87,10 @@ def check_request(request: Request, token: str) -> None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "bad or missing token")
 
 
-def check_websocket(websocket: WebSocket, token: str) -> bool:
+def check_websocket(
+    websocket: WebSocket, token: str, origins: frozenset[str] = DEFAULT_ALLOWED_ORIGINS
+) -> bool:
     origin = websocket.headers.get("origin")
-    if origin is not None and origin not in ALLOWED_ORIGINS:
+    if origin is not None and origin not in origins:
         return False
     return _matches(websocket.query_params.get("token"), token)

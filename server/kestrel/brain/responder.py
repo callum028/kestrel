@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .context_assembly import build_prompt, render_for_headless
-from .routing import Turn, decide_model
+from .routing import DEFAULT_MODEL_NAMES, ModelNames, Turn, decide_model
 from .runner import BrainRunner, MCPServerSpec
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -42,6 +42,7 @@ class BrainResponder:
     mcp_servers: list[MCPServerSpec] = field(default_factory=list)
     allowed_tools: tuple[str, ...] = DEFAULT_ALLOWED_TOOLS
     project: str | None = None
+    models: ModelNames = field(default_factory=lambda: DEFAULT_MODEL_NAMES)
 
     name = "brain"
 
@@ -56,7 +57,7 @@ class BrainResponder:
             project=self.project,
         )
         system_prompt, query = render_for_headless(bundle)
-        model = decide_model(Turn(text=text, history=history))
+        model = decide_model(Turn(text=text, history=history), self.models)
         result = await self.runner.run(
             system_prompt=system_prompt,
             user_message=query,

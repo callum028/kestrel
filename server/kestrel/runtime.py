@@ -20,6 +20,7 @@ from .board_sync import BoardSync
 from .brain.narration import NarrationKind, NarrationRequest
 from .brain.narration import narrate as _narrate_via_brain
 from .brain.responder import BrainResponder
+from .brain.routing import ModelNames
 from .brain.runner import BrainConfig, BrainRunner, MCPServerSpec
 from .config import Config
 from .conversation import ConversationStore, Responder
@@ -103,9 +104,15 @@ def _build_narrator(config: Config, log: EventLog) -> Narrator | None:
             EventKind.BRAIN_CALL_FAILED, "kestrel", {"error": f"{type(exc).__name__}: {exc}"}
         )
 
+    models = ModelNames(haiku=config.brain_haiku_model, sonnet=config.brain_sonnet_model)
+
     async def narrator(request: NarrationRequest) -> str:
         return await _narrate_via_brain(
-            request, runner=runner, identity_dir=config.identity_dir, log_failure=_log_failure
+            request,
+            runner=runner,
+            identity_dir=config.identity_dir,
+            log_failure=_log_failure,
+            models=models,
         )
 
     return narrator
@@ -143,6 +150,7 @@ def _build_brain_responder(config: Config, rt: Runtime) -> BrainResponder:
         mcp_servers=[
             MCPServerSpec(name="kestrel", command=mcp_command, args=mcp_args, env=mcp_env)
         ],
+        models=ModelNames(haiku=config.brain_haiku_model, sonnet=config.brain_sonnet_model),
     )
 
 

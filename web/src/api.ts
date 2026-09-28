@@ -84,6 +84,10 @@ export interface ConversationMessage {
 // - Tauri: the page comes from tauri://localhost, an origin with no API on it.
 //   Relative URLs silently go nowhere, which is exactly what happened the first
 //   time this was built. The shell injects the real address instead.
+// - Served by the Kestrel server itself (web_static.py, on the Pi behind
+//   `tailscale serve`): same origin as the API by construction - one process,
+//   one tailnet URL - so this already falls out of the `location.protocol`
+//   branch below with no change needed.
 //
 // Injected rather than baked in at build time so the server can move to the Pi
 // without rebuilding the app. (CSP connect-src has to allow the host too.)
@@ -94,9 +98,23 @@ const BASE =
   (location.protocol.startsWith("http") ? "" : FALLBACK_API);
 
 // The token is a header, never a cookie: browsers attach cookies to cross-site
-// requests automatically, which is exactly the hole this is closing. Tauri
-// injects it at startup after reading it off disk, so it is never baked into
-// the bundle; the dev server passes it through the environment instead.
+// requests automatically, which is exactly the hole this is closing.
+//
+// Resolution order (docs/design.md §11a, §13 - the Tauri shell that used to
+// inject this is superseded, and the design explicitly forbids baking a
+// token into the bundle):
+//
+//   1. `window.__KESTREL_TOKEN__` - a desktop shell that still injects one.
+//   2. `VITE_KESTREL_TOKEN` - dev only (`import.meta.env.DEV`), never a
+//      production build; a released bundle serves any number of devices and
+//      cannot carry one device's secret.
+//   3. `localStorage` - what pairing (below, and `App.tsx`'s handling of
+//      `#pair=<token>`) actually populates for a phone or a browser tab that
+//      has no shell to inject anything.
+//
+// `TOKEN` is a mutable module-level binding rather than a `const`, precisely
+// so pairing/unpairing take effect immediately for every subsequent call
+// without a page reload - see `setToken`/`clearToken`.
 declare global {
   interface Window {
     /** Injected by the desktop shell: where the Kestrel server actually is. */
@@ -108,10 +126,82 @@ declare global {
   }
 }
 
-const TOKEN = window.__KESTREL_TOKEN__ || import.meta.env.VITE_KESTREL_TOKEN || "";
+const STORAGE_KEY = "kestrel:token";
+
+function readStoredToken(): string {
+  try {
+    return localStorage.getItem(STORAGE_KEY) || "";
+  } catch {
+    // Private browsing / blocked storage: pairing simply can't persist here,
+    // which surfaces as "no token" - not a crash.
+    return "";
+  }
+}
+
+let TOKEN =
+  window.__KESTREL_TOKEN__ ||
+  (import.meta.env.DEV ? import.meta.env.VITE_KESTREL_TOKEN : undefined) ||
+  readStoredToken() ||
+  "";
 
 export const tokenSource = window.__KESTREL_TOKEN_SOURCE__;
-export const hasToken = TOKEN.length > 0;
+export function hasToken(): boolean {
+  return TOKEN.length > 0;
+}
+
+/** Called once a candidate token (from a pairing link or the paste-token
+ * fallback) has been checked against the server - see `validateToken`. */
+export function setToken(token: string): void {
+  TOKEN = token;
+  try {
+    localStorage.setItem(STORAGE_KEY, token);
+  } catch {
+    // Nothing to fall back to - the token still works for this page load,
+    // it just won't survive a refresh. Not worth surfacing as an error.
+  }
+}
+
+/** The "unpair this device" action: forgets the token everywhere this module
+ * knows about it. The next call will 401/403, which `json()` below turns
+ * into a call to `onTokenRejected` - the same path a server-side rotation
+ * takes - so callers don't need a separate "go back to pairing" case. */
+export function clearToken(): void {
+  TOKEN = "";
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // Already effectively cleared for this session (TOKEN above); a stale
+    // value left in storage after a blocked removal is a private-browsing
+    // edge case, not a security issue on its own.
+  }
+}
+
+/** Checks a candidate token against a real endpoint before it's ever stored -
+ * a mistyped paste or a stale pairing link must never make it into
+ * localStorage looking valid. `/pair/validate` requires no state of its own;
+ * any authenticated endpoint would do, this one just names the purpose. */
+export async function validateToken(candidate: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${BASE}/pair/validate`, {
+      headers: { Authorization: `Bearer ${candidate}` },
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Set by App.tsx's auth gate. A 401/403 on *any* call - not just pairing's
+// own validation - means the stored token was rejected (typically a
+// rotation on the server, e.g. after `~/.kestrel/token` was restored from
+// backup) and the device needs to be re-paired rather than quietly failing
+// forever. See docs/design.md §11a's "can't reach Kestrel" table, which this
+// is deliberately distinct from - a 401/403 is "wrong token", not "no
+// server".
+let onTokenRejected: (() => void) | null = null;
+export function setOnTokenRejected(callback: (() => void) | null): void {
+  onTokenRejected = callback;
+}
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = { Authorization: `Bearer ${TOKEN}` };
@@ -119,6 +209,8 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
 
   const response = await fetch(`${BASE}${path}`, { ...init, headers });
   if (response.status === 401 || response.status === 403) {
+    clearToken();
+    onTokenRejected?.();
     throw new Error(`${path} → ${response.status}: token rejected`);
   }
   if (!response.ok) throw new Error(`${init?.method ?? "GET"} ${path} → ${response.status}`);

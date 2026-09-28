@@ -68,6 +68,22 @@ uv venv --python 3.12 "$RELEASE_DIR/venv" >/dev/null
 uv pip install --python "$RELEASE_DIR/venv/bin/python" \
     -e "$RELEASE_DIR/agent" -e "$RELEASE_DIR/server"
 
+# Built once per release, alongside the venv - server/kestrel/web_static.py
+# serves this from the running server itself (KESTREL_WEB_DIST defaults to
+# <release>/web/dist, see config.py), which is what makes the tailnet URL
+# `tailscale serve` fronts double as the PWA's install source. pi-setup.sh
+# installs Node; if it's missing here the release is still usable as an API
+# only (the server logs and serves API routes with no shell), so this warns
+# rather than failing the whole deploy over a missing frontend toolchain.
+if command -v npm >/dev/null 2>&1; then
+    log "building web app"
+    (cd "$RELEASE_DIR/web" && npm ci && npm run build)
+else
+    log "WARNING: npm not found - skipping the web build. The server will run" \
+        "API-only until Node is installed and this release is redeployed" \
+        "(or KESTREL_WEB_DIST is pointed at a build done elsewhere)."
+fi
+
 # Capture what "current" points at BEFORE moving it, so a failed health check
 # below has something to roll back to. Empty on a first-ever deploy.
 PREV_RELEASE=""

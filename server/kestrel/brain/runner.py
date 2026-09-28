@@ -54,11 +54,17 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 logger = logging.getLogger("kestrel.brain.runner")
 
-Model = Literal["haiku", "sonnet"]
+Model = str
+"""The `--model` value passed straight through to the CLI - one of the
+built-in aliases (`"haiku"`, `"sonnet"`) by default, or whatever
+`KESTREL_BRAIN_HAIKU_MODEL`/`KESTREL_BRAIN_SONNET_MODEL` configure instead
+(see `brain/routing.ModelNames`). A plain `str` rather than a `Literal`
+because a configured deployment may pin an exact model string the CLI
+accepts but this codebase has no fixed list of."""
 
 # Built-in tools the brain must never see. Bash/Edit/Write/Read/NotebookEdit
 # are the ones that touch a filesystem or a shell; WebFetch/WebSearch are

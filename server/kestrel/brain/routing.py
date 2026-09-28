@@ -39,6 +39,23 @@ _DEPTH_PHRASES = (
 
 
 @dataclass(frozen=True)
+class ModelNames:
+    """The `--model` alias/name to pass the CLI for each tier - configurable
+    via `KESTREL_BRAIN_HAIKU_MODEL`/`KESTREL_BRAIN_SONNET_MODEL` (see
+    `config.Config`), since the CLI's own built-in aliases (`haiku`/`sonnet`)
+    are a moving target and a deployment may want to pin an exact model
+    string instead. Defaults match those aliases, so an unconfigured
+    deployment behaves exactly as it did when `decide_model` returned them
+    as literals."""
+
+    haiku: str = "haiku"
+    sonnet: str = "sonnet"
+
+
+DEFAULT_MODEL_NAMES = ModelNames()
+
+
+@dataclass(frozen=True)
 class Turn:
     """Everything `decide_model` needs to know about one turn. A dataclass
     rather than passing `text`/`history`/`summarising_task` positionally, so
@@ -52,20 +69,21 @@ class Turn:
     summarising_task_report: bool = False
 
 
-def decide_model(turn: Turn) -> Model:
+def decide_model(turn: Turn, models: ModelNames = DEFAULT_MODEL_NAMES) -> Model:
     """Haiku unless the turn asks for depth or is a finished-task summary.
 
     Replaceable: nothing else in `brain/` depends on this being a keyword
     match rather than a classifier - swap the body out and every caller
-    (responder.py, narration.py) keeps working.
+    (responder.py, narration.py) keeps working. `models` is the only place
+    the actual `--model` strings come from - see `ModelNames`.
     """
     if turn.summarising_task_report:
-        return "sonnet"
+        return models.sonnet
     text = turn.text.lower()
     if any(re.search(rf"\b{re.escape(phrase)}\b", text) for phrase in _DEPTH_PHRASES):
-        return "sonnet"
+        return models.sonnet
     if text.count("?") >= 2:
         # More than one question in a turn tends to be "walk me through this
         # and also X" rather than a single lookup.
-        return "sonnet"
-    return "haiku"
+        return models.sonnet
+    return models.haiku

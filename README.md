@@ -65,13 +65,20 @@ back to its fixed deterministic template instead of being reworded. See `kestrel
    approve), `claude` (logs in via a browser on another device), and `gh auth login` if sessions will
    open PRs via `gh` under this account.
 3. Copy and fill in the env file (above), `chmod 600` it.
-4. `deploy/deploy.sh <tag>` — first real deploy: builds the release venv, points `current` at it,
-   starts `kestrel-server.service`, health-checks, rolls back automatically on failure. Then start the
-   session host once (`deploy.sh` never touches it): `systemctl --user enable --now
+4. `deploy/deploy.sh <tag>` — first real deploy: builds the release venv **and the web app**
+   (`web/dist`, served by the server itself — see `server/kestrel/web_static.py`), points `current`
+   at it, starts `kestrel-server.service`, health-checks, rolls back automatically on failure. Then
+   start the session host once (`deploy.sh` never touches it): `systemctl --user enable --now
    kestrel-session-host.service`.
 5. `systemctl --user enable --now kestrel-backup.timer` for nightly backups.
 6. `sudo tailscale serve --bg 127.0.0.1:8099` so the web app is reachable over tailnet HTTPS (never
-   Funnel — see `deploy/README.md`).
+   Funnel — see `deploy/README.md`). Add that URL to `KESTREL_ALLOWED_ORIGINS` in the env file and
+   restart the server, or every request from it 403s (`docs/design.md` §11a).
+7. Pair each device: `kestrel-pair --base https://<your-tailnet-url>` prints a one-time link — the
+   token rides in the URL fragment, never baked into the bundle and never logged. Open it once on
+   each phone/desktop to store the token there, then install the page as a PWA. See
+   `deploy/README.md`'s "Tailscale Serve" section for the full walkthrough and how to un-pair a
+   device later.
 
 ### Mail (Microsoft Graph)
 
