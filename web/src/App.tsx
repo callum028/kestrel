@@ -82,6 +82,7 @@ function Shell() {
           tasks={data.tasks}
           deliveries={data.deliveries}
           messages={data.messages}
+          thinking={data.thinking}
           sendMessage={data.sendMessage}
           refresh={data.refresh}
           focusDeliveryId={focusDeliveryId}
@@ -92,6 +93,7 @@ function Shell() {
           tasks={data.tasks}
           deliveries={data.deliveries}
           messages={data.messages}
+          thinking={data.thinking}
           sendMessage={data.sendMessage}
           refresh={data.refresh}
           focusDeliveryId={focusDeliveryId}
@@ -106,12 +108,22 @@ interface WorkspaceProps {
   tasks: ReturnType<typeof useKestrelData>["tasks"];
   deliveries: ReturnType<typeof useKestrelData>["deliveries"];
   messages: ReturnType<typeof useKestrelData>["messages"];
+  thinking: ReturnType<typeof useKestrelData>["thinking"];
   sendMessage: ReturnType<typeof useKestrelData>["sendMessage"];
   refresh: ReturnType<typeof useKestrelData>["refresh"];
   focusDeliveryId: string | null;
 }
 
-function DeskWorkspace({ state, tasks, deliveries, messages, sendMessage, refresh, focusDeliveryId }: WorkspaceProps) {
+function DeskWorkspace({
+  state,
+  tasks,
+  deliveries,
+  messages,
+  thinking,
+  sendMessage,
+  refresh,
+  focusDeliveryId,
+}: WorkspaceProps) {
   const [tab, setTab] = useState<string>("work");
   const [terminals, setTerminals] = useState<TerminalInfo[]>([]);
   const [activeTerminal, setActiveTerminal] = useState<string | null>(null);
@@ -295,7 +307,7 @@ function DeskWorkspace({ state, tasks, deliveries, messages, sendMessage, refres
               ))
             )}
           </div>
-          <ConversationPane messages={messages} onSend={sendMessage} compact />
+          <ConversationPane messages={messages} thinking={thinking} onSend={sendMessage} compact />
         </aside>
       </div>
     </div>

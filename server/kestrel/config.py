@@ -103,6 +103,27 @@ class Config:
     github_token: str | None = None
     github_repo: str | None = None  # "owner/name"
 
+    # The brain (kestrel.brain): headless `claude -p` calls behind Kestrel's
+    # own conversation, distinct from the interactive PTY sessions above -
+    # separate binary/args/model/timeout knobs because the two have nothing
+    # in common except both shelling out to `claude`. Empty by default, same
+    # backward-compatibility reasoning as claude_projects: a hand-built
+    # Config (most tests) gets the StubResponder rather than needing to know
+    # about any of this.
+    brain_claude_binary: str | None = None
+    brain_claude_base_args: tuple[str, ...] = ()
+    brain_timeout_seconds: float = 60.0
+    brain_haiku_model: str = "haiku"
+    brain_sonnet_model: str = "sonnet"
+    brain_mcp_server_command: str | None = None
+    brain_mcp_server_args: tuple[str, ...] = ()
+
+    @property
+    def brain_work_dir(self) -> Path:
+        # A dedicated, empty directory - never a project checkout. See
+        # brain/runner.py's BrainConfig.work_dir.
+        return self.data_dir / "brain-workdir"
+
     @property
     def token_path(self) -> Path:
         return self.data_dir / "token"
@@ -145,6 +166,9 @@ class Config:
             server_url=os.environ.get("KESTREL_SERVER_URL", DEFAULT_SERVER_URL),
             github_token=os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"),
             github_repo=os.environ.get("KESTREL_GITHUB_REPO"),
+            brain_claude_binary=os.environ.get("KESTREL_BRAIN_CLAUDE_BINARY"),
+            brain_timeout_seconds=float(os.environ.get("KESTREL_BRAIN_TIMEOUT_SECONDS", "60")),
+            brain_mcp_server_command=os.environ.get("KESTREL_BRAIN_MCP_COMMAND"),
         )
 
     def ensure_dirs(self) -> None:

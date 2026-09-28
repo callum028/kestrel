@@ -6,13 +6,14 @@ per-task history - `refs` is how a message points *at* a task without the
 conversation being split by one), which is why the store takes no conversation
 id anywhere in its API.
 
-**Contract for the brain step (later):** implement `Responder.respond` against
-a real model. It receives the new user text and the recent history and returns
-the reply text - nothing else in this module needs to change. `post_user_message`
-already does the plumbing: store the user message, ask the responder, store the
-reply, log both. Swapping `StubResponder` for a real one is the entire brain
-integration as far as this module is concerned; retrieval, tool calls and
-context assembly (docs/design.md §4.5) live inside the responder, not here.
+**Brain step:** `Responder.respond` is implemented against a real model in
+`kestrel.brain.responder.BrainResponder` - it receives the new user text and
+the recent history and returns the reply text; retrieval, tool calls and
+context assembly (docs/design.md §4.5) live inside it, not here.
+`post_user_message` stores the user message and returns immediately; the
+reply is generated in the background (a headless `claude -p` call is not
+something a request handler should block on) and lands in this same table
+once it's ready - see `_respond_and_store` and the `thinking` property.
 
 Message shape returned to clients:
     {id, role: "user" | "kestrel" | "system", text, created_at, refs: [{kind, handle}]}
@@ -25,7 +26,9 @@ future endpoint can do it server-side without a schema change.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -33,6 +36,8 @@ from typing import Any, Protocol
 
 from .db import Database
 from .events import EventKind, EventLog
+
+logger = logging.getLogger("kestrel.conversation")
 
 BRAIN_NOT_CONNECTED = "Kestrel's brain isn't connected yet."
 
@@ -102,6 +107,11 @@ class ConversationStore:
         self._conn = conn
         self._log = log
         self._responder = responder or StubResponder()
+        # Background reply tasks in flight. A set, not a single slot, because
+        # nothing stops Callum sending a second message before the first
+        # reply lands - both run, both land in order they finish, same as
+        # any other "no fan-out, but never block on one thing" surface here.
+        self._pending: set[asyncio.Task[None]] = set()
 
     def _insert(
         self,
@@ -125,16 +135,54 @@ class ConversationStore:
     async def post_user_message(
         self, text: str, refs: list[Ref] | None = None, now: datetime | None = None
     ) -> ConversationMessage:
-        """Stores the user's message, then asks the responder for Kestrel's
-        reply and stores that too - both land in the same table, one after the
-        other, so a client polling `since` sees the full exchange. Returns only
-        the user message, per the endpoint contract; the reply shows up on the
-        next poll like anything else Kestrel says."""
+        """Stores the user's message and returns immediately - the reply is
+        generated in the background (the brain is a subprocess call, and
+        posting a message must not block on it) and lands via the same table
+        once it's ready, so a client polling `since` sees it appear like
+        anything else Kestrel says. `thinking` is true for the window in
+        between, for a client that wants to show that.
+
+        A responder that raises is not swallowed: it becomes a visible
+        system-role message plus a logged `BRAIN_CALL_FAILED` event, per
+        "every instruction ends in a state" - silence is never an outcome,
+        including when the brain itself is the thing that broke.
+        """
         user_message = self._insert("user", text, refs, now)
         history = self.since(limit=50)
-        reply_text = await self._responder.respond(text, history)
-        self._insert("kestrel", reply_text)
+        task = asyncio.create_task(self._respond_and_store(text, history))
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
         return user_message
+
+    async def _respond_and_store(self, text: str, history: list[ConversationMessage]) -> None:
+        try:
+            reply_text = await self._responder.respond(text, history)
+        except Exception as exc:
+            logger.exception("brain responder failed")
+            self._log.append(EventKind.BRAIN_CALL_FAILED, "kestrel", {"error": str(exc)})
+            self._insert("system", f"Kestrel's brain didn't respond: {exc}")
+            return
+        self._insert("kestrel", reply_text)
+
+    def set_responder(self, responder: Responder) -> None:
+        """Swap the responder after construction. `Runtime.build` uses this
+        to wire in a real brain once the rest of `Runtime` exists - the brain
+        needs `rt.state_block`/`rt.tasks.active`, neither of which exist yet
+        at the point this store itself is built."""
+        self._responder = responder
+
+    @property
+    def thinking(self) -> bool:
+        """True while at least one reply is being generated in the
+        background - the visible "thinking" state the brain step asks for."""
+        return bool(self._pending)
+
+    async def wait_idle(self) -> None:
+        """Test/debug helper: block until every in-flight reply has landed.
+        Never called from request-handling code - that is the entire point
+        of making replies asynchronous."""
+        while self._pending:
+            await asyncio.gather(*list(self._pending), return_exceptions=True)
 
     def since(self, after: int = 0, limit: int = 200) -> list[ConversationMessage]:
         """Oldest to newest, unlike events.since which this otherwise mirrors -

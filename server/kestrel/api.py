@@ -32,7 +32,10 @@ from .attention import Focus, Signals
 from .auth import ALLOWED_ORIGINS, check_request, check_websocket, load_or_create_token
 from .config import Config
 from .events import EventKind
+from .mail import render_untrusted
+from .memory import Source
 from .observations import ObservationState
+from .outcomes import Refused
 from .runtime import Runtime
 from .tasks import IllegalTransition, TaskState
 from .waits import WaitKind
@@ -131,6 +134,35 @@ class AckIn(BaseModel):
 
 class ConversationIn(BaseModel):
     text: str
+
+
+class ReplyIn(BaseModel):
+    text: str
+
+
+class TicketIn(BaseModel):
+    title: str
+    body: str = ""
+    lane: str | None = None
+    project: str | None = None
+
+
+class MemoryIn(BaseModel):
+    fact: str
+    category: str
+    source: str = "explicit"
+    scope: str = "global"
+    task_ref: str | None = None
+    core: bool = False
+
+
+class ForgetIn(BaseModel):
+    reason: str = ""
+
+
+class RuleIn(BaseModel):
+    rule: str
+    scope: str = "global"
 
 
 class SubscriptionKeys(BaseModel):
@@ -455,6 +487,14 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
     def list_conversation_messages(after: int = 0, limit: int = 200) -> list[dict[str, Any]]:
         return [m.to_dict() for m in rt.conversation.since(after, limit)]
 
+    @app.get("/conversation/status")
+    def conversation_status() -> dict[str, Any]:
+        # The visible "thinking" state the brain step asks for: a reply is
+        # being generated in the background (see conversation.py), and there
+        # is nothing to poll for yet except this flag - the reply itself
+        # shows up via the messages endpoint like anything else Kestrel says.
+        return {"thinking": rt.conversation.thinking}
+
     # --- web push ---------------------------------------------------------
     # Notifications route through Kestrel's own delivery/attention model
     # (docs/design.md §4.6) - this is the transport that reaches a closed app,
@@ -622,5 +662,245 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
             "core": rt.memory.core(project),
             "count": len(rt.memory.all()),
         }
+
+    # --- brain step: task detail/control, board, mail, memory writes -------
+    # New surface for kestrel-mcp (server/kestrel/brain/mcp_server.py) - the
+    # brain never talks to Notion/Graph/the task store directly, it goes
+    # through this same authenticated HTTP boundary like every other caller.
+
+    def _outcome_dict(outcome: Any) -> dict[str, Any]:
+        if isinstance(outcome, Refused):
+            return {"status": "refused", "reason": outcome.reason}
+        return {"status": "ok"}
+
+    def _ticket_dict(ticket: Any) -> dict[str, Any]:
+        return {
+            "id": ticket.id,
+            "handle": ticket.handle,
+            "title": ticket.title,
+            "lane": ticket.lane,
+            "url": ticket.url,
+            "project": ticket.project,
+            "flagged": ticket.flagged,
+            "pr_url": ticket.pr_url,
+        }
+
+    @app.get("/tasks/{handle}")
+    async def task_detail(handle: str) -> dict[str, Any]:
+        task = rt.tasks.by_handle(handle)
+        if task is None:
+            return {"status": "not_found", "searched_for": handle, "looked_in": "tasks"}
+
+        events = rt.log.for_task(task.id)
+        answered = {
+            e.payload.get("question_seq")
+            for e in events
+            if e.kind == EventKind.TASK_ANSWERED and e.payload.get("question_seq") is not None
+        }
+        pending_question = None
+        for e in reversed(events):
+            if e.kind == EventKind.TASK_QUESTION and e.seq not in answered:
+                pending_question = e.payload.get("message")
+                break
+
+        ci = next((e.payload for e in reversed(events) if e.kind == EventKind.VALIDATION_RUN), None)
+        final_report = next(
+            (
+                e.payload.get("report")
+                for e in reversed(events)
+                if e.kind == EventKind.TASK_CLOSED and e.payload.get("report")
+            ),
+            None,
+        )
+
+        pr_url = None
+        ticket_url = None
+        if task.ticket_ref:
+            ticket = await rt.board.get(task.ticket_ref)
+            if ticket is not None:
+                pr_url = ticket.pr_url
+                ticket_url = ticket.url
+
+        queued = task.id in rt.dev_lock.queue()
+        holder = rt.dev_lock.holder()
+        pending_wait = queued or (holder is not None and holder.task_id == task.id)
+
+        return {
+            "status": "ok",
+            "handle": task.handle,
+            "goal": task.goal,
+            "state": task.state,
+            "executor": task.executor,
+            "nudges": task.nudges,
+            "criteria": task.criteria,
+            "time_in_state_seconds": (datetime.now(UTC) - task.updated_at).total_seconds(),
+            "pr_url": pr_url,
+            "ticket_url": ticket_url,
+            "ci": ci,
+            "pending_wait": pending_wait,
+            "pending_question": pending_question,
+            "final_report": final_report,
+        }
+
+    @app.post("/tasks/{handle}/reply")
+    async def reply_to_task(handle: str, body: ReplyIn) -> dict[str, Any]:
+        """The user's words, verbatim, into the task's session - see
+        docs/design.md §1 ("Claude's questions reach the user verbatim... the
+        user's answers reach Claude verbatim"). Surfaces whatever the
+        executor's `send` returns, including a deferred `Refused` (a human is
+        already typing in that session) rather than pretending it landed."""
+        task = rt.tasks.by_handle(handle)
+        if task is None:
+            return {"status": "not_found", "searched_for": handle, "looked_in": "tasks"}
+        executor = rt.executors.get(task.executor)
+        if executor is None:
+            return {"status": "refused", "reason": f"no {task.executor} executor registered"}
+        outcome = await executor.send(task, body.text)
+        return _outcome_dict(outcome)
+
+    @app.post("/tasks/{handle}/stop")
+    async def stop_task(handle: str) -> dict[str, Any]:
+        task = rt.tasks.by_handle(handle)
+        if task is None:
+            return {"status": "not_found", "searched_for": handle, "looked_in": "tasks"}
+        executor = rt.executors.get(task.executor)
+        if executor is not None:
+            await executor.stop(task, reason="stopped by user")
+        try:
+            updated = rt.tasks.transition(
+                task.id, TaskState.PARKED, actor="callum", reason="stopped by user"
+            )
+        except IllegalTransition as exc:
+            return {"status": "refused", "reason": str(exc)}
+        return {"status": "ok", "state": updated.state}
+
+    @app.post("/tasks/{handle}/retry")
+    async def retry_task(handle: str) -> dict[str, Any]:
+        task = rt.tasks.by_handle(handle)
+        if task is None:
+            return {"status": "not_found", "searched_for": handle, "looked_in": "tasks"}
+        executor = rt.executors.get(task.executor)
+        if executor is None:
+            return {"status": "refused", "reason": f"no {task.executor} executor registered"}
+        try:
+            updated = rt.tasks.transition(
+                task.id, TaskState.RUNNING, actor="callum", reason="retry"
+            )
+        except IllegalTransition as exc:
+            return {"status": "refused", "reason": str(exc)}
+        await executor.start(task, brief=task.goal)
+        return {"status": "ok", "state": updated.state}
+
+    @app.get("/board/tickets/find")
+    async def find_ticket(handle: str) -> dict[str, Any]:
+        ticket = await rt.board.find_by_handle(handle)
+        if ticket is None:
+            return {"status": "not_found", "searched_for": handle, "looked_in": "board"}
+        return {"status": "ok", **_ticket_dict(ticket)}
+
+    @app.post("/board/tickets")
+    async def create_ticket(body: TicketIn) -> dict[str, Any]:
+        ticket = await rt.board.create(
+            title=body.title, body=body.body, lane=body.lane, project=body.project
+        )
+        return {"status": "ok", **_ticket_dict(ticket)}
+
+    @app.get("/board/tickets")
+    async def list_board() -> list[dict[str, Any]]:
+        tickets = await rt.board.changed_since(None)
+        return [_ticket_dict(t) for t in tickets]
+
+    @app.get("/mail/recent")
+    async def mail_recent(
+        limit: int = 10, sender: str | None = None, query: str | None = None
+    ) -> list[dict[str, Any]]:
+        summaries = await rt.mail.recent(limit=limit, sender=sender, query=query)
+        return [
+            {
+                "id": m.id,
+                "sender": m.sender,
+                "subject": m.subject,
+                "received": m.received.isoformat(),
+                "preview": m.preview,
+            }
+            for m in summaries
+        ]
+
+    @app.get("/mail/{message_id}")
+    async def mail_get(message_id: str) -> dict[str, Any]:
+        message = await rt.mail.get(message_id)
+        if message is None:
+            return {"status": "not_found", "searched_for": message_id, "looked_in": "mail"}
+        # Untrusted-wrapped, per mail.py's rule: content is never handed to a
+        # model without the boundary marker that says it is data, not
+        # instructions.
+        return {"status": "ok", "id": message.id, "untrusted": render_untrusted(message)}
+
+    @app.post("/mail/{message_id}/to-task")
+    async def email_to_task(message_id: str) -> dict[str, Any]:
+        message = await rt.mail.get(message_id)
+        if message is None:
+            return {"status": "not_found", "searched_for": message_id, "looked_in": "mail"}
+        wrapped = render_untrusted(message)
+        ticket = await rt.board.create(title=f"From email: {message.subject}", body=wrapped)
+        if rt.tasks.by_handle(ticket.handle) is not None:
+            return {"status": "refused", "reason": f"{ticket.handle} already exists"}
+        task = rt.tasks.create(
+            handle=ticket.handle,
+            goal=f"Triage email: {message.subject}",
+            criteria=[],
+            executor="kestrel",
+            ticket_ref=ticket.id,
+        )
+        return {"status": "ok", "handle": task.handle, "ticket_url": ticket.url}
+
+    @app.post("/memory")
+    def remember(body: MemoryIn) -> dict[str, Any]:
+        try:
+            source = Source(body.source)
+        except ValueError:
+            return {"status": "refused", "reason": f"unknown memory source: {body.source!r}"}
+        entry = rt.memory.write(
+            fact=body.fact,
+            category=body.category,
+            source=source,
+            scope=body.scope,
+            task_ref=body.task_ref,
+            core=body.core,
+        )
+        return {"status": "ok", "id": entry.id}
+
+    @app.post("/memory/{entry_id}/forget")
+    def forget(entry_id: str, body: ForgetIn) -> dict[str, Any]:
+        try:
+            rt.memory.forget(entry_id, reason=body.reason)
+        except FileNotFoundError:
+            return {"status": "not_found", "searched_for": entry_id, "looked_in": "memory"}
+        return {"status": "ok"}
+
+    @app.get("/memory/all")
+    def list_memories(project: str | None = None) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": e.id,
+                "fact": e.fact,
+                "category": e.category,
+                "source": e.source,
+                "scope": e.scope,
+                "core": e.core,
+                "created_at": e.created_at.isoformat(),
+            }
+            for e in rt.memory.scoped(project)
+        ]
+
+    @app.post("/rules")
+    def add_rule(body: RuleIn) -> dict[str, Any]:
+        # Sugar over a memory write: a rule is just a fact that is always
+        # injected (`core=True`) and categorised so it reads as a standing
+        # instruction rather than a preference.
+        entry = rt.memory.write(
+            fact=body.rule, category="rule", source=Source.EXPLICIT, scope=body.scope, core=True
+        )
+        return {"status": "ok", "id": entry.id}
 
     return app

@@ -476,6 +476,11 @@ button {
   font-size: 11px;
 }
 
+.bubble.thinking .bubble-text {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
 .bubble-ref {
   display: inline-block;
   margin-top: 4px;

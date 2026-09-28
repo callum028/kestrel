@@ -14,6 +14,7 @@ interface Props {
   tasks: Task[];
   deliveries: Delivery[];
   messages: ConversationMessage[];
+  thinking: boolean;
   sendMessage: (text: string) => Promise<unknown>;
   refresh: () => Promise<void>;
   /** Set once, from a notification's deep link (public/sw.js -> /?delivery=id) -
@@ -31,6 +32,7 @@ export function PhoneWorkspace({
   tasks,
   deliveries,
   messages,
+  thinking,
   sendMessage,
   refresh,
   focusDeliveryId,
@@ -87,7 +89,9 @@ export function PhoneWorkspace({
       )}
 
       <main className="phone-body">
-        {view.kind === "chat" && <ConversationPane messages={messages} onSend={sendMessage} />}
+        {view.kind === "chat" && (
+          <ConversationPane messages={messages} thinking={thinking} onSend={sendMessage} />
+        )}
 
         {view.kind === "tasks" && (
           <div className="phone-task-list">
