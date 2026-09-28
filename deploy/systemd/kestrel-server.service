@@ -1,0 +1,56 @@
+# Kestrel server (FastAPI/uvicorn) — the part that gets redeployed often.
+#
+# No BindsTo=/PartOf=/Requires= on kestrel-session-host.service in either
+# direction, matching agent/kestrel_agent/host.py's contract: this unit
+# restarting, failing, or being redeployed must never touch the session host
+# or the Claude Code PTYs it owns. The server is a *client* of the host's
+# Unix socket, not its parent — if the socket isn't there, `/terminals`
+# endpoints degrade to {"status": "unavailable"} (see server/kestrel/api.py),
+# they don't crash the server.
+#
+# After= the session host is ordering only, so a normal boot brings the host
+# up first (matches "server tolerates the host being down" from the spec —
+# order is a courtesy, not a dependency).
+#
+# User unit for the same reason as the session host: unprivileged account,
+# no root needed, deploy.sh restarts it without sudo.
+#
+# Install: ~/.config/systemd/user/kestrel-server.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now kestrel-server.service
+
+[Unit]
+Description=Kestrel server (FastAPI/uvicorn)
+After=network-online.target kestrel-session-host.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+WorkingDirectory=%h/kestrel/current
+EnvironmentFile=%h/.config/kestrel/kestrel.env
+
+# Bound to loopback only (docs/design.md §11a: "bind to loopback in dev;
+# never --host [0.0.0.0]" - on the Pi, Tailscale Serve is what puts this on
+# the tailnet, terminating TLS and proxying to 127.0.0.1 itself, so uvicorn
+# never needs to listen on anything else). Port matches web/vite.config.ts
+# and web/src/api.ts's FALLBACK_API (http://localhost:8099) - if this changes,
+# update those too and deploy/kestrel.env.example's comment.
+ExecStart=%h/kestrel/current/venv/bin/uvicorn kestrel.api:create_app --factory --host 127.0.0.1 --port 8099
+
+# uvicorn handles SIGTERM as a graceful shutdown (finishes in-flight
+# requests, runs the lifespan shutdown in server/kestrel/api.py which only
+# disconnects this process's session-host client connection - the host and
+# every terminal survive). Redeploys should be quick; this is generous
+# headroom for a slow request, not an expectation of one.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+Restart=on-failure
+RestartSec=2
+
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

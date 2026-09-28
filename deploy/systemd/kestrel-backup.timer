@@ -1,0 +1,19 @@
+# Nightly at 03:15 local time, plus up to 10 minutes of random jitter so a
+# fleet of one doesn't matter, but a slow SD/SSD write doesn't collide with
+# anything else scheduled on the hour. Persistent=true catches up a missed
+# run (Pi was powered off / mid-upgrade at 03:15).
+#
+# Install: ~/.config/systemd/user/kestrel-backup.timer
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now kestrel-backup.timer
+
+[Unit]
+Description=Nightly Kestrel backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target
