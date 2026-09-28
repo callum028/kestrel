@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type ConversationMessage, type Delivery, type State, type Task, type TaskDetail } from "./api";
+import { AccountMenu } from "./AccountMenu";
 import { ConversationPane } from "./ConversationPane";
 import { PhoneSession } from "./PhoneSession";
 
@@ -21,6 +22,7 @@ interface Props {
    * scrolled into view in the strip rather than driving navigation, since a
    * delivery is not a screen of its own. */
   focusDeliveryId: string | null;
+  onUnpair: () => void;
 }
 
 // Phone view per docs/design.md §7: Kestrel chat is the home screen, a strip
@@ -36,6 +38,7 @@ export function PhoneWorkspace({
   sendMessage,
   refresh,
   focusDeliveryId,
+  onUnpair,
 }: Props) {
   const [view, setView] = useState<View>({ kind: "chat" });
   const [detail, setDetail] = useState<TaskDetail | null>(null);
@@ -84,6 +87,11 @@ export function PhoneWorkspace({
 
   return (
     <div className="phone-app">
+      <header className="phone-header">
+        <span className="brand">Kestrel</span>
+        <AccountMenu onUnpair={onUnpair} />
+      </header>
+
       {needsYouCount > 0 && (
         <div className="needs-you-strip">
           <span className="needs-you-label">Needs you</span>

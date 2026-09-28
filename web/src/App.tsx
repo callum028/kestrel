@@ -9,6 +9,7 @@ import {
   type TerminalInfo,
   validateToken,
 } from "./api";
+import { AccountMenu } from "./AccountMenu";
 import { ConversationPane } from "./ConversationPane";
 import { PhoneWorkspace } from "./PhoneWorkspace";
 import { PushToggle } from "./PushToggle";
@@ -234,33 +235,6 @@ function OriginErrorBanner({
   );
 }
 
-function UnpairControl({ onUnpair }: { onUnpair: () => void }) {
-  // Deliberately unobtrusive - unpairing is rare and destructive enough
-  // (this device stops being able to reach Kestrel at all until paired
-  // again) that it shouldn't sit next to anything reached in normal use.
-  return (
-    <button
-      type="button"
-      onClick={() => {
-        if (window.confirm("Unpair this device? You'll need a new pairing link to use it again.")) {
-          onUnpair();
-        }
-      }}
-      title="Unpair this device"
-      style={{
-        position: "fixed",
-        bottom: 8,
-        right: 8,
-        opacity: 0.4,
-        fontSize: 11,
-        zIndex: 100,
-      }}
-    >
-      Unpair
-    </button>
-  );
-}
-
 function Shell({
   onUnpair,
   originError,
@@ -276,7 +250,6 @@ function Shell({
 
   return (
     <>
-      <UnpairControl onUnpair={onUnpair} />
       <OriginErrorBanner message={originError} onDismiss={onDismissOriginError} />
       <OfflineBanner reachable={data.reachable} />
       {isPhone ? (
@@ -289,6 +262,7 @@ function Shell({
           sendMessage={data.sendMessage}
           refresh={data.refresh}
           focusDeliveryId={focusDeliveryId}
+          onUnpair={onUnpair}
         />
       ) : (
         <DeskWorkspace
@@ -300,6 +274,7 @@ function Shell({
           sendMessage={data.sendMessage}
           refresh={data.refresh}
           focusDeliveryId={focusDeliveryId}
+          onUnpair={onUnpair}
         />
       )}
     </>
@@ -315,6 +290,7 @@ interface WorkspaceProps {
   sendMessage: ReturnType<typeof useKestrelData>["sendMessage"];
   refresh: ReturnType<typeof useKestrelData>["refresh"];
   focusDeliveryId: string | null;
+  onUnpair: () => void;
 }
 
 function DeskWorkspace({
@@ -326,6 +302,7 @@ function DeskWorkspace({
   sendMessage,
   refresh,
   focusDeliveryId,
+  onUnpair,
 }: WorkspaceProps) {
   const [tab, setTab] = useState<string>("work");
   const [terminals, setTerminals] = useState<TerminalInfo[]>([]);
@@ -417,6 +394,7 @@ function DeskWorkspace({
           <span className={`dot ${state?.presence ?? "away"}`} />
           {state?.presence?.replace("_", " ") ?? "…"}
         </span>
+        <AccountMenu onUnpair={onUnpair} />
       </header>
 
       <div className="work">

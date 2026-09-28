@@ -22,6 +22,25 @@ interface Instance {
 
 const instances = new Map<string, Instance>();
 
+/** The shell prompt this renders (Callum's, in practice) often draws Nerd
+ * Font glyphs from the private use area - a plain monospace font has no
+ * coverage for those, so they render as tofu boxes. `--term-font-family` in
+ * styles.css lists common local Nerd Font installs before the regular UI
+ * mono stack; nothing is fetched over a CDN for it, so a machine without any
+ * of them just falls through. Overridable per device without a rebuild via
+ * `localStorage.setItem("kestrel:terminalFont", "...")`, or by redefining
+ * the CSS variable itself. */
+function terminalFontFamily(): string {
+  try {
+    const override = window.localStorage.getItem("kestrel:terminalFont");
+    if (override) return override;
+  } catch {
+    // localStorage can throw in a locked-down browser context - fall through.
+  }
+  const fromCss = getComputedStyle(document.documentElement).getPropertyValue("--term-font-family").trim();
+  return fromCss || '"JetBrains Mono", "Cascadia Code", ui-monospace, monospace';
+}
+
 const THEME = {
   background: "#0d0f12",
   foreground: "#d8dee9",
@@ -42,7 +61,7 @@ function ensure(id: string): Instance {
   if (existing) return existing;
 
   const term = new Terminal({
-    fontFamily: '"JetBrains Mono", "Cascadia Code", ui-monospace, monospace',
+    fontFamily: terminalFontFamily(),
     fontSize: 13,
     lineHeight: 1.25,
     cursorBlink: true,
