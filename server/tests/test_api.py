@@ -61,6 +61,45 @@ def test_creating_the_same_handle_twice_is_refused_not_duplicated(client):
     assert "already exists" in second["reason"]
 
 
+def test_creating_a_task_with_no_executor_registered_stays_created(client):
+    """No executor for `claude_code` is wired into the bare `client` fixture -
+    the same "nothing to supervise with" case `_intervene` reports on the
+    tick side, here just meaning nothing auto-starts."""
+    result = make_task(client)
+    assert result["state"] == "created"
+
+
+def test_creating_a_task_with_a_registered_executor_briefs_and_starts_it(config):
+    from kestrel.api import create_app
+    from kestrel.executors import ExecutorKind
+    from kestrel.outcomes import Ok
+    from kestrel.runtime import Runtime
+
+    class RecordingExecutor:
+        kind = ExecutorKind.CLAUDE_CODE
+
+        def __init__(self):
+            self.started = []
+
+        async def start(self, task, brief):
+            self.started.append((task.handle, brief))
+
+        async def send(self, task, message):
+            return Ok()
+
+        async def stop(self, task, reason):
+            pass
+
+    executor = RecordingExecutor()
+    rt = Runtime.build(config, executors={ExecutorKind.CLAUDE_CODE: executor})
+    app = create_app(runtime=rt)
+    with TestClient(app, headers={"Authorization": f"Bearer {app.state.token}"}) as c:
+        result = make_task(c)
+
+    assert result["state"] == "running"
+    assert executor.started == [("KES-31", "Handle token refresh failure")]
+
+
 def test_an_unattributed_hook_is_recorded_rather_than_dropped(client):
     body = client.post(
         "/hooks/claude",

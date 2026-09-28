@@ -404,7 +404,7 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
         ]
 
     @app.post("/tasks")
-    def create_task(body: TaskIn) -> dict[str, Any]:
+    async def create_task(body: TaskIn) -> dict[str, Any]:
         if rt.tasks.by_handle(body.handle) is not None:
             return {"status": "refused", "reason": f"{body.handle} already exists"}
         task = rt.tasks.create(
@@ -415,6 +415,17 @@ def create_app(config: Config | None = None, runtime: Runtime | None = None) -> 
             scope=body.scope,
             ticket_ref=body.ticket_ref,
         )
+        # A task with a registered executor is briefed and started right
+        # away - creating one (from the board, from the brain's start_task
+        # tool, or directly) is "go do this now", not "queue this for later".
+        # Left at CREATED, with no executor registered for it (a kind not
+        # built yet, or the Claude Code executor simply not configured) -
+        # the same gap /tasks/{handle}/retry already tolerates.
+        executor = rt.executors.get(task.executor)
+        if executor is not None:
+            task = rt.tasks.transition(task.id, TaskState.BRIEFED, reason="executor available")
+            task = rt.tasks.transition(task.id, TaskState.RUNNING, reason="started")
+            await executor.start(task, brief=task.goal)
         return {"status": "ok", "id": task.id, "handle": task.handle, "state": task.state}
 
     @app.post("/tasks/{handle}/state/{to}")
