@@ -182,6 +182,7 @@ class Runtime:
         executors: dict[str, Executor] | None = None,
         board: Board | None = None,
         responder: Responder | None = None,
+        github: GitHub | None = None,
     ) -> Runtime:
         config.ensure_dirs()
         conn = connect(config.db_path)
@@ -220,7 +221,7 @@ class Runtime:
         board = board or build_board(config.board)
         board_sync = BoardSync(board, tasks, log, conn)
         waits = WaitStore(conn, log)
-        github = build_github(config)
+        github = github if github is not None else build_github(config)
         memory = MemoryStore(config.memory_repo, log)
         rt = cls(
             config=config,
