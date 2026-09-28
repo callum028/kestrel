@@ -294,6 +294,36 @@ async def test_diff_is_empty_for_an_untouched_worktree(live):
     assert diff.added == diff.removed == diff.files == []
 
 
+async def test_diff_still_shows_work_thats_already_been_committed(live, tmp_path):
+    """The realistic path to opening a PR: commit (and typically push)
+    everything before the turn ends, so by the time Stop fires and claim
+    validation runs, the working tree is clean. Diffing against bare `HEAD`
+    would see that as empty and reject "done" as a false claim - diffing
+    against the branch's own fork point (`_diff_base`) still sees the
+    committed work as real evidence."""
+    rt, executor = live
+    task = rt.tasks.create("KES-15b", "Fix the bug", ["tests pass"], "claude_code", scope="proj")
+    await executor.start(task, brief="brief")
+    worktree = tmp_path / "worktrees" / "KES-15b"
+
+    (worktree / "README.md").write_text("goodbye\n")
+    _git("add", "README.md", cwd=worktree)
+    _git("commit", "-m", "fix it", cwd=worktree)
+
+    diff = await executor.diff(task)
+    assert "README.md" in diff.files
+    assert any("goodbye" in line for line in diff.added)
+    assert any("hello" in line for line in diff.removed)
+
+    # And the progress hash moved too, even though the working tree is now
+    # clean - a session that only ever commits (never leaves anything
+    # uncommitted) must still register as making progress.
+    baseline_hash = await executor.progress_hash(task)
+    assert baseline_hash is not None
+    _git("commit", "--allow-empty", "-m", "another commit", cwd=worktree)
+    assert await executor.progress_hash(task) != baseline_hash
+
+
 async def test_symbol_exists_checks_the_worktrees_tracked_content(live):
     rt, executor = live
     task = rt.tasks.create("KES-14", "Fix the bug", ["tests pass"], "claude_code", scope="proj")
