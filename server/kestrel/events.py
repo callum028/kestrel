@@ -27,6 +27,14 @@ class EventKind(StrEnum):
     TASK_QUESTION = "task.question"
     TASK_ANSWERED = "task.answered"
     TASK_CLOSED = "task.closed"
+    TASK_TICKET_LINKED = "task.ticket_linked"
+
+    # Board (Notion). Mechanical - a deterministic side-effect of task state,
+    # never a model decision; Claude never touches the board. Every write is
+    # logged so drift is debuggable and so the poller can tell its own echo
+    # apart from a manual move.
+    BOARD_WRITTEN = "board.written"
+    BOARD_INSTRUCTION = "board.instruction"
 
     # Session activity. Note this is activity, not progress - the distinction is
     # the whole point of the stall detector.
