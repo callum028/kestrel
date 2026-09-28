@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { api, type ConversationMessage, type Delivery, type State, type Task } from "./api";
+import { useEffect, useState } from "react";
+import { api, type ConversationMessage, type Delivery, type State, type Task, type TaskDetail } from "./api";
 import { ConversationPane } from "./ConversationPane";
 import { PhoneSession } from "./PhoneSession";
 
@@ -38,6 +38,25 @@ export function PhoneWorkspace({
   focusDeliveryId,
 }: Props) {
   const [view, setView] = useState<View>({ kind: "chat" });
+  const [detail, setDetail] = useState<TaskDetail | null>(null);
+
+  // Fetched fresh whenever the task screen opens (or the handle changes) -
+  // the list-level `Task` the tabs share doesn't carry final_report/ci/
+  // validation/pr_url, only /tasks/{handle} does.
+  useEffect(() => {
+    if (view.kind !== "task") {
+      setDetail(null);
+      return;
+    }
+    let cancelled = false;
+    setDetail(null);
+    api.taskDetail(view.handle).then((result) => {
+      if (!cancelled && result.status === "ok") setDetail(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [view]);
 
   const needsInput = tasks.filter((t) => t.state === "needs_input");
   const urgentDeliveries = deliveries.filter((d) => d.urgency !== "observation");
@@ -132,6 +151,44 @@ export function PhoneWorkspace({
             <p className="sub">
               {activeTask.executor} · {activeTask.nudges} nudge{activeTask.nudges === 1 ? "" : "s"}
             </p>
+
+            {detail && (detail.pr_url || detail.ci || detail.validation) && (
+              <>
+                <h3>PR &amp; CI</h3>
+                {detail.pr_url && (
+                  <p className="sub">
+                    <a href={detail.pr_url} target="_blank" rel="noreferrer">
+                      {detail.pr_url}
+                    </a>
+                  </p>
+                )}
+                {detail.ci && (
+                  <p className={`state ${detail.ci.state}`}>CI: {detail.ci.state} - {detail.ci.summary}</p>
+                )}
+                {detail.validation && (
+                  <p className={`state ${detail.validation.ok ? "success" : "failure"}`}>
+                    Validation: {detail.validation.summary}
+                    {detail.validation.failing_tests.length > 0 &&
+                      ` (${detail.validation.failing_tests.join(", ")})`}
+                  </p>
+                )}
+              </>
+            )}
+
+            {detail?.pending_question && (
+              <>
+                <h3>Claude's asking</h3>
+                <p className="claude-question">{detail.pending_question}</p>
+              </>
+            )}
+
+            {detail?.final_report && (
+              <>
+                <h3>Kestrel's summary</h3>
+                <p className="final-report">{detail.final_report}</p>
+              </>
+            )}
+
             <button className="open-session" onClick={() => openTaskSession(activeTask)}>
               Open session
             </button>
