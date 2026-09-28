@@ -80,6 +80,21 @@ class GitHub(Protocol):
         refusal as "landing did not happen", never as a crash."""
         ...
 
+    async def workflow_run_status(self, workflow: str, sha: str) -> CIStatus | None:
+        """Status of the named GitHub Actions workflow's run for `sha` - one
+        way validation confirms the dev deploy actually happened for *this*
+        merge, not just that some earlier deploy is still green. `None` means
+        no run has been recorded for that sha yet (distinct from `PENDING`,
+        which means one is in flight)."""
+        ...
+
+    async def pr_files(self, pr_number: int) -> list[str]:
+        """File paths changed by a PR. Read at validation time (after the PR
+        branch itself may already be gone, squashed into the default branch)
+        for the unrequested-spec-change check - reusing the PR's own file
+        list is simpler and cheaper than diffing commits by sha."""
+        ...
+
 
 class GitHubRestClient:
     def __init__(self, token: str, repo: str, *, client: httpx.AsyncClient | None = None) -> None:
@@ -157,6 +172,30 @@ class GitHubRestClient:
             reason = resp.text
         return Refused(reason=f"merge of PR #{pr_number} refused: {reason}")
 
+    async def workflow_run_status(self, workflow: str, sha: str) -> CIStatus | None:
+        resp = await self._client.get(
+            f"/repos/{self._repo}/actions/workflows/{workflow}/runs",
+            params={"head_sha": sha, "per_page": 1},
+        )
+        resp.raise_for_status()
+        runs = resp.json().get("workflow_runs", [])
+        if not runs:
+            return None
+        run = runs[0]
+        if run.get("status") != "completed":
+            return CIStatus(CIState.PENDING, f"{workflow} still running for {sha[:8]}")
+        conclusion = run.get("conclusion")
+        if conclusion == "success":
+            return CIStatus(CIState.SUCCESS, f"{workflow} deployed {sha[:8]}")
+        return CIStatus(CIState.FAILURE, f"{workflow} failed for {sha[:8]} ({conclusion})")
+
+    async def pr_files(self, pr_number: int) -> list[str]:
+        resp = await self._client.get(
+            f"/repos/{self._repo}/pulls/{pr_number}/files", params={"per_page": 100}
+        )
+        resp.raise_for_status()
+        return [f["filename"] for f in resp.json()]
+
 
 @dataclass
 class FakeGitHub:
@@ -168,6 +207,9 @@ class FakeGitHub:
     ci: dict[str, CIStatus] = field(default_factory=dict)  # branch -> status
     merged: list[int] = field(default_factory=list)
     refuse_merge: str | None = None  # set to make `merge` refuse, evidence-testing
+    merge_sha: str = "fake-sha"
+    workflow_runs: dict[tuple[str, str], CIStatus | None] = field(default_factory=dict)
+    files: dict[int, list[str]] = field(default_factory=dict)  # pr_number -> changed files
 
     async def find_pr_for_branch(self, branch: str) -> PullRequest | None:
         return self.prs.get(branch)
@@ -179,7 +221,13 @@ class FakeGitHub:
         if self.refuse_merge:
             return Refused(reason=self.refuse_merge)
         self.merged.append(pr_number)
-        return Ok(value="fake-sha")
+        return Ok(value=self.merge_sha)
+
+    async def workflow_run_status(self, workflow: str, sha: str) -> CIStatus | None:
+        return self.workflow_runs.get((workflow, sha))
+
+    async def pr_files(self, pr_number: int) -> list[str]:
+        return self.files.get(pr_number, [])
 
 
 def build_github(config: object) -> GitHub | None:

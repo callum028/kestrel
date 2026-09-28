@@ -275,7 +275,9 @@ async def test_a_detected_pr_moves_the_task_to_awaiting_dev(
     assert tasks.get(t.id).state is TaskState.AWAITING_DEV
 
 
-async def test_green_ci_merges_and_moves_to_validating(landing_orchestrator, tasks, github, asleep):
+async def test_green_ci_merges_and_moves_to_validating(
+    landing_orchestrator, tasks, github, conn, asleep
+):
     t = running(tasks)
     github.prs["kestrel/KES-32"] = _pr()
     await landing_orchestrator.tick(NIGHT, asleep)  # detects the PR -> AWAITING_DEV
@@ -285,7 +287,12 @@ async def test_green_ci_merges_and_moves_to_validating(landing_orchestrator, tas
 
     assert report.merged == ["KES-32"]
     assert github.merged == [7]
-    assert tasks.get(t.id).state is TaskState.VALIDATING
+    # This fixture has no project validation configured, so the same tick's
+    # validation pass (see test_validation.py for the configured case) walks
+    # it straight through to DONE and releases the dev lock - the fix for
+    # "nothing ever releases the dev lock", not a second bug.
+    assert tasks.get(t.id).state is TaskState.DONE
+    assert DevLock(conn).holder() is None
 
 
 async def test_red_ci_parks_the_task_instead_of_merging(
