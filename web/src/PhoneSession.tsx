@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { terminalSocket } from "./api";
+import { terminalCloseMessage, terminalSocket } from "./api";
 
 // eslint-disable-next-line no-control-regex
 const ANSI = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\r/g;
@@ -30,7 +30,10 @@ export function PhoneSession({ terminalId, onClose }: Props) {
     const ws = terminalSocket(terminalId);
     socket.current = ws;
     ws.onopen = () => setConnected(true);
-    ws.onclose = () => setConnected(false);
+    ws.onclose = (event) => {
+      setConnected(false);
+      setText((prev) => prev + `\n[${terminalCloseMessage(event)}]\n`);
+    };
     ws.onmessage = (event) => {
       const data = String(event.data);
       if (data.startsWith("{") && data.includes('"type":"exit"')) {

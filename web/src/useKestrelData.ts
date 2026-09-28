@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type ConversationMessage, type Delivery, type State, type Task } from "./api";
+import {
+  api,
+  isUnavailable,
+  type ConversationMessage,
+  type Delivery,
+  type State,
+  type Task,
+  type TerminalInfo,
+} from "./api";
 
 const POLL_MS = 3000;
 
@@ -12,6 +20,13 @@ export function useKestrelData() {
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [thinking, setThinking] = useState(false);
+  const [terminals, setTerminals] = useState<TerminalInfo[]>([]);
+  // Set from GET /terminals's "unavailable" shape (the session host - a
+  // separate long-lived process - isn't reachable), null while it is. Polled
+  // here rather than only from the desk's terminal rail so a phone that
+  // hasn't opened a session yet still gets the banner instead of finding out
+  // only when "Open session" quietly fails.
+  const [sessionHostReason, setSessionHostReason] = useState<string | null>(null);
   // Distinct from "loading": this is "the last poll failed", which is the
   // fact an offline state has to surface rather than just showing whatever
   // was fetched last as if it were still current.
@@ -47,11 +62,36 @@ export function useKestrelData() {
     }
   }, []);
 
+  // A missing session host is not "no terminals" - it is a different, more
+  // serious thing (kestrel/api.py's `_unavailable`), and it must not look
+  // like an empty list here either.
+  const refreshTerminals = useCallback(async () => {
+    try {
+      const result = await api.terminals();
+      if (isUnavailable(result)) {
+        setTerminals([]);
+        setSessionHostReason(result.reason);
+      } else {
+        setTerminals(result);
+        setSessionHostReason(null);
+      }
+      setReachable(true);
+    } catch {
+      setReachable(false);
+    }
+  }, []);
+
   useEffect(() => {
     refresh().catch(() => undefined);
     const id = setInterval(() => refresh().catch(() => undefined), POLL_MS);
     return () => clearInterval(id);
   }, [refresh]);
+
+  useEffect(() => {
+    refreshTerminals().catch(() => undefined);
+    const id = setInterval(() => refreshTerminals().catch(() => undefined), POLL_MS);
+    return () => clearInterval(id);
+  }, [refreshTerminals]);
 
   useEffect(() => {
     pollMessages().catch(() => undefined);
@@ -68,5 +108,17 @@ export function useKestrelData() {
     [pollMessages],
   );
 
-  return { state, tasks, deliveries, messages, thinking, reachable, refresh, sendMessage };
+  return {
+    state,
+    tasks,
+    deliveries,
+    messages,
+    thinking,
+    terminals,
+    sessionHostReason,
+    reachable,
+    refresh,
+    refreshTerminals,
+    sendMessage,
+  };
 }
