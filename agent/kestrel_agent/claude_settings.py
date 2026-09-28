@@ -29,8 +29,43 @@ SETTINGS_RELATIVE = Path(".claude/settings.local.json")
 
 # No matcher on any of these: Kestrel wants every firing of each event, not a
 # tool-filtered subset. See code.claude.com/docs/hooks for the payload shape
-# each one carries on stdin.
-HOOK_EVENTS = ("SessionStart", "Stop", "Notification", "UserPromptSubmit", "PostToolUse")
+# each one carries on stdin. `PreToolUse` was missing here even though
+# `/hooks/claude` has always handled it (api.py's HookIn/claude_hook treat
+# Pre- and PostToolUse identically) - without it registered, activity was
+# only ever counted on the trailing edge of a tool call, which matters for
+# anything long-running.
+HOOK_EVENTS = (
+    "SessionStart",
+    "Stop",
+    "Notification",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+)
+
+# Told to Claude via the brief (see `write_brief` below), not the identity
+# layer (which is Kestrel's own model, not Claude Code's) - this is the one
+# place a task's instructions are assembled before they reach the worktree.
+# The point: Claude must never arm its own watcher for something external
+# (`gh run watch`, a sleep loop, polling a health endpoint) - that unattended
+# polling loop is the overnight failure supervision exists to catch. It
+# registers what it is waiting for instead and stops, and Kestrel wakes it
+# when the real thing resolves or the deadline passes.
+WAIT_INSTRUCTIONS = """
+## Waiting on something external
+
+If you need to wait on something outside this session - a CI run, a
+deployment becoming healthy, anything you would otherwise poll for - do not
+poll it yourself and do not sleep in a loop. Register it and end your turn:
+
+    kestrel-wait ci --branch <branch> [--timeout <minutes>]
+    kestrel-wait url <https://...> --expect <status> [--timeout <minutes>]
+    kestrel-wait deadline --minutes <n> --reason "<what you're waiting for>"
+
+Kestrel checks the real thing on its own schedule and will send you a message
+with the result (or tell you the deadline passed) - you do not need to, and
+should not, check it yourself in the meantime.
+""".strip()
 
 
 def hooks_settings(hook_command: str = "kestrel-hook") -> dict:
@@ -49,7 +84,7 @@ def write_hooks_settings(worktree: Path, hook_command: str = "kestrel-hook") -> 
 def write_brief(worktree: Path, brief: str) -> Path:
     path = worktree / BRIEF_RELATIVE
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(brief)
+    path.write_text(f"{brief}\n\n{WAIT_INSTRUCTIONS}\n")
     _exclude(worktree, BRIEF_RELATIVE)
     return path
 

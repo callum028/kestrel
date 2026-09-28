@@ -139,6 +139,23 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     auth       TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+-- Kestrel-owned waits. Claude registers "waiting on X" (via `kestrel-wait`)
+-- instead of arming its own watcher; Kestrel polls the real thing on the tick
+-- and wakes the session with a factual result, or escalates on deadline
+-- expiry. One row per outstanding wait; resolved ones are kept (not deleted)
+-- so "what was this task waiting on" stays answerable.
+CREATE TABLE IF NOT EXISTS waits (
+    id           TEXT PRIMARY KEY,
+    task_id      TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    params       TEXT NOT NULL,
+    deadline     TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    resolved_at  TEXT,
+    result       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_waits_task ON waits(task_id, resolved_at);
 """
 
 

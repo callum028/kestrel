@@ -25,6 +25,12 @@ class WorktreeError(RuntimeError):
     happy-path case on restart."""
 
 
+def task_branch(handle: str) -> str:
+    """The one place this naming convention is spelled out, so GitHub PR
+    lookups (`kestrel.github`) and worktree creation can never drift apart."""
+    return f"kestrel/{handle}"
+
+
 def _run(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=False)
 
@@ -88,8 +94,9 @@ def ensure_worktree(repo_path: Path, worktrees_root: Path, handle: str) -> Path:
         _run(["git", "fetch", "--all", "--prune"], repo_path)
 
     branch = _default_branch(repo_path)
-    task_branch = f"kestrel/{handle}"
-    result = _run(["git", "worktree", "add", str(target), "-b", task_branch, branch], repo_path)
+    result = _run(
+        ["git", "worktree", "add", str(target), "-b", task_branch(handle), branch], repo_path
+    )
     if result.returncode != 0:
         raise WorktreeError(f"git worktree add failed for {handle}: {result.stderr.strip()}")
     return target

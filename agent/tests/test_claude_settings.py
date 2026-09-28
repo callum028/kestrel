@@ -16,6 +16,7 @@ import pytest
 
 from kestrel_agent.claude_settings import (
     HOOK_EVENTS,
+    WAIT_INSTRUCTIONS,
     hooks_settings,
     write_brief,
     write_hooks_settings,
@@ -55,11 +56,16 @@ def test_write_hooks_settings_writes_valid_json_into_the_worktree(worktree):
     assert json.loads(path.read_text()) == hooks_settings()
 
 
-def test_write_brief_writes_the_brief_verbatim(worktree):
+def test_write_brief_writes_the_brief_and_the_wait_instructions(worktree):
     brief = 'Fix the thing.\nWatch out for `backticks` and "quotes".\n'
     path = write_brief(worktree, brief)
     assert path == worktree / ".claude" / "kestrel-brief.md"
-    assert path.read_text() == brief
+    written = path.read_text()
+    assert written.startswith(brief)
+    # Claude must not arm its own watcher - it registers a wait and stops
+    # instead of polling, and that instruction lives in every brief.
+    assert WAIT_INSTRUCTIONS in written
+    assert "kestrel-wait" in written
 
 
 def test_settings_and_brief_are_excluded_from_the_worktrees_branch(worktree):

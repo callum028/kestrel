@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 
 from kestrel_agent.host_client import SessionHostClient
 
-from .attention import AttentionState, Signals, compute
+from .attention import AttentionState, Signals, Urgency, compute
 from .board import Board, build_board
 from .board_sync import BoardSync
 from .config import Config
@@ -24,14 +24,24 @@ from .devlock import DevLock
 from .events import EventKind, EventLog
 from .executors import Executor, ExecutorKind
 from .executors.claude_code import ClaudeCodeConfig, ClaudeCodeExecutor
+from .github import GitHub, build_github
 from .graph_mail import GraphMailConfig, GraphMailReader
 from .mail import FakeMailReader, MailReader, RecordingMailReader
 from .memory import MemoryStore
 from .observations import ObservationStore
 from .orchestrator import Orchestrator, TickReport
+from .outcomes import NotFound, Ok, Outcome, Refused
 from .push import PushSender, PushSubscriptionStore, load_or_create_vapid_keys
-from .tasks import TaskStore
+from .supervision import (
+    Diff,
+    extract_blocked_claim,
+    introduced_blocker_markers,
+    unrequested_spec_changes,
+    validate_blocker,
+)
+from .tasks import Task, TaskState, TaskStore
 from .terminal_activity import HumanActivityTracker
+from .waits import WaitKind, WaitStore, default_deadline
 
 logger = logging.getLogger("kestrel")
 
@@ -80,6 +90,8 @@ class Runtime:
     push_subscriptions: PushSubscriptionStore
     push: PushSender
     vapid_public_key: str
+    waits: WaitStore
+    github: GitHub | None
     human_activity: HumanActivityTracker = field(default_factory=HumanActivityTracker)
     executors: dict[str, Executor] = field(default_factory=dict)
 
@@ -131,6 +143,9 @@ class Runtime:
             }
         executors = executors or {}
         board = board or build_board(config.board)
+        board_sync = BoardSync(board, tasks, log, conn)
+        waits = WaitStore(conn, log)
+        github = build_github(config)
         return cls(
             config=config,
             conn=conn,
@@ -140,15 +155,26 @@ class Runtime:
             observations=ObservationStore(conn, log),
             deliveries=deliveries,
             dev_lock=dev_lock,
-            orchestrator=Orchestrator(tasks, log, deliveries, dev_lock, executors),
+            orchestrator=Orchestrator(
+                tasks,
+                log,
+                deliveries,
+                dev_lock,
+                executors,
+                waits=waits,
+                github=github,
+                board_sync=board_sync,
+            ),
             terminals=terminals,
             mail=_build_mail_reader(config, log),
             board=board,
-            board_sync=BoardSync(board, tasks, log, conn),
+            board_sync=board_sync,
             conversation=ConversationStore(conn, log, responder=responder),
             push_subscriptions=push_subscriptions,
             push=push,
             vapid_public_key=vapid_keys.public_key_b64,
+            waits=waits,
+            github=github,
             human_activity=human_activity,
             executors=executors,
         )
@@ -196,6 +222,122 @@ class Runtime:
             "SELECT task_id FROM sessions WHERE session_id = ?", (session_id,)
         ).fetchone()
         return row["task_id"] if row else None
+
+    # --- waits ----------------------------------------------------------------
+    # See waits.py and kestrel_agent.kestrel_wait: a task registers what it is
+    # waiting on instead of arming its own watcher, and the orchestrator polls
+    # the real thing on the tick.
+
+    def register_wait(
+        self,
+        task_handle: str,
+        kind: WaitKind,
+        params: dict[str, object],
+        timeout_minutes: float | None = None,
+        now: datetime | None = None,
+    ) -> Outcome:
+        task = self.tasks.by_handle(task_handle)
+        if task is None:
+            return NotFound(searched_for=task_handle, looked_in="tasks")
+        now = now or datetime.now(UTC)
+        deadline = default_deadline(kind, now, timeout_minutes)
+        wait = self.waits.register(task.id, kind, params, deadline, actor="agent")
+        return Ok(value={"wait_id": wait.id, "deadline": wait.deadline.isoformat()})
+
+    # --- claim validation -------------------------------------------------------
+    # "Blocked" is a claim exactly like "done" is a claim - both get checked
+    # against the diff rather than taken on trust (supervision.py).
+
+    async def check_completion_claim(
+        self, task_id: str, last_assistant_message: str | None
+    ) -> Outcome:
+        task = self.tasks.get(task_id)
+        executor = self.executors.get(task.executor)
+        differ = getattr(executor, "diff", None)
+        if differ is None:
+            # No worktree to check against (not a Claude Code task, or the
+            # executor is not registered) - nothing to validate.
+            return Ok()
+
+        diff: Diff = await differ(task)
+
+        if not diff.files and not diff.added and not diff.removed:
+            return await self._reject_claim(
+                task, executor, f"{task.handle} claims done but the worktree diff is empty."
+            )
+
+        markers = introduced_blocker_markers(diff)
+        if markers:
+            return await self._reject_claim(
+                task,
+                executor,
+                f"{task.handle} claims done but introduced: {'; '.join(markers)}",
+            )
+
+        spec_check = unrequested_spec_changes(diff, task.criteria)
+        if spec_check.status == "ambiguous":
+            candidates = ", ".join(spec_check.candidates)
+            return await self._reject_claim(
+                task,
+                executor,
+                f"{task.handle} claims done but edited tests the criteria didn't ask for: "
+                f"{candidates}",
+            )
+
+        blocked = extract_blocked_claim(last_assistant_message)
+        if blocked:
+            exists = await executor.symbol_exists(task, blocked)
+            result = validate_blocker(blocked, diff, {blocked} if exists else set())
+            if isinstance(result, Refused):
+                return await self._reject_claim(task, executor, f"{task.handle}: {result.reason}")
+
+        self.log.append(EventKind.CLAIM_ACCEPTED, "kestrel", {}, task_id=task_id)
+        return Ok()
+
+    async def _reject_claim(self, task: Task, executor: Executor, evidence: str) -> Outcome:
+        self.log.append(EventKind.CLAIM_REJECTED, "kestrel", {"reason": evidence}, task_id=task.id)
+        await executor.send(
+            task, f"{evidence} If the work is really done, say where it is; otherwise continue."
+        )
+        return Refused(reason=evidence)
+
+    # --- restart reconciliation -------------------------------------------------
+
+    async def reconcile_on_startup(self, now: datetime | None = None) -> list[str]:
+        """Every task believed `RUNNING` is checked against the session host
+        on startup - never assumed healthy just because it was last seen that
+        way. Returns the handles found unaccountable; the ongoing per-tick
+        `alive` check (orchestrator.py) takes care of actually parking them,
+        so this is only responsible for making the fact visible immediately
+        rather than waiting for the report to notice on its own."""
+        now = now or datetime.now(UTC)
+        unaccountable: list[str] = []
+        for task in self.tasks.active():
+            if task.state is not TaskState.RUNNING:
+                continue
+            executor = self.executors.get(task.executor)
+            checker = getattr(executor, "alive", None)
+            if checker is None:
+                continue
+            alive = await checker(task)
+            if alive is not True:
+                unaccountable.append(task.handle)
+                self.log.append(
+                    EventKind.RECONCILE_UNACCOUNTABLE,
+                    "kestrel",
+                    {"alive": alive},
+                    task_id=task.id,
+                )
+        if unaccountable:
+            self.deliveries.send(
+                subject="restart: tasks unaccounted for",
+                body=f"On restart, {len(unaccountable)} task(s) believed running had no live "
+                f"session on the host: {', '.join(unaccountable)}. The next tick will act on it.",
+                urgency=Urgency.NORMAL,
+                state=self.attention(now),
+                now=now,
+            )
+        return unaccountable
 
     # --- the loop -----------------------------------------------------------
 

@@ -12,6 +12,7 @@ Claude supplies the capability; Kestrel supplies the persistence.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -25,9 +26,40 @@ NO_PROGRESS_AFTER = timedelta(minutes=15)
 REPETITION_THRESHOLD = 6
 MAX_NUDGES = 3
 
+# No hook activity of any kind (not even a tool call that leaves the worktree
+# untouched) for this long, with no wait registered, is almost always a
+# broken watcher rather than genuine thinking time - the session has gone
+# quiet on a shell polling loop `kestrel-wait` should have replaced. Shorter
+# than NO_PROGRESS_AFTER deliberately: silence is a stronger, earlier signal
+# than "busy but the diff isn't moving".
+IDLE_NO_WAIT_AFTER = timedelta(minutes=10)
+
+# A `claude` process that never fires SessionStart's bind or a first
+# UserPromptSubmit within this long of the terminal being created is very
+# likely blocked on a workspace-trust or bypass-permissions confirmation it
+# cannot get past unattended.
+STARTUP_TIMEOUT = timedelta(minutes=5)
+
 # Markers a session introduces that assert a dependency. A comment claiming to
 # wait on something is a smell worth seeing every time.
 BLOCKER_MARKERS = ("todo", "waiting on", "waiting for", "blocked on", "disabled until")
+
+# What a completion claim's own text is checked against for a stated blocker -
+# "blocked on LEGACY_SYNC", "waiting on the API team", 'waiting for `FLAG`'.
+_BLOCKED_CLAIM = re.compile(
+    r"(?:blocked on|waiting on|waiting for)\s+[`\"']?([\w./-]+)[`\"']?", re.IGNORECASE
+)
+
+
+def extract_blocked_claim(text: str | None) -> str | None:
+    """The thing a completion claim says it is stuck on, if it says so at all.
+    Used to feed `validate_blocker` from a Stop hook's `last_assistant_message`
+    - "blocked" is a claim exactly like "done" is, so it gets named and checked
+    rather than taken on trust."""
+    if not text:
+        return None
+    match = _BLOCKED_CLAIM.search(text)
+    return match.group(1) if match else None
 
 
 class StallReason(StrEnum):
@@ -36,6 +68,9 @@ class StallReason(StrEnum):
     REPETITION = "repetition"
     WALL_CLOCK = "wall_clock"
     TURNS = "turns"
+    IDLE_NO_WAIT = "idle_no_wait"
+    PROCESS_DIED = "process_died"
+    STARTUP_STUCK = "startup_stuck"
 
 
 class Action(StrEnum):
@@ -82,14 +117,37 @@ def _repeated_call(events: list[Event]) -> tuple[str, int] | None:
     return (call, count) if count >= REPETITION_THRESHOLD else None
 
 
+def _session_started_at(events: list[Event]) -> datetime | None:
+    for e in events:
+        if e.kind is EventKind.SESSION_STARTED:
+            return e.ts
+    return None
+
+
+def _startup_completed(events: list[Event]) -> bool:
+    return any(e.kind in (EventKind.SESSION_BOUND, EventKind.PROMPT_SUBMITTED) for e in events)
+
+
 def detect(
-    task: Task, events: list[Event], now: datetime, budget: Budget | None = None
+    task: Task,
+    events: list[Event],
+    now: datetime,
+    budget: Budget | None = None,
+    has_pending_wait: bool = False,
 ) -> StallVerdict:
     """Activity is not progress. A polling loop produces plenty of activity.
 
     Checked cheapest-and-most-certain first, so the evidence returned is the most
     specific true statement available - which matters, because that evidence is
     used verbatim as the nudge.
+
+    `has_pending_wait` is set by the caller when the task has a live
+    `waits.Wait` registered (see `waits.py`). A session that correctly
+    registered a wait and ended its turn is not stalled by definition - it is
+    doing exactly what it should - so the no-progress and idle checks below
+    are suppressed while one is outstanding. The wall-clock/turn budgets and
+    the repetition check still apply: a wait does not excuse a session that is
+    *also* burning turns on something else.
     """
     budget = budget or Budget()
 
@@ -108,6 +166,20 @@ def detect(
             True, StallReason.TURNS, f"{turns} tool calls on one task, past the {budget.turns} cap"
         )
 
+    started_at = _session_started_at(events)
+    if (
+        started_at is not None
+        and not _startup_completed(events)
+        and now - started_at > STARTUP_TIMEOUT
+    ):
+        return StallVerdict(
+            True,
+            StallReason.STARTUP_STUCK,
+            f"the session for {task.handle} started {minutes(now - started_at)} ago but never "
+            f"got past startup - probably a workspace-trust or permissions prompt waiting on "
+            f"an answer nobody can give it unattended.",
+        )
+
     repeated = _repeated_call(events)
     if repeated is not None:
         call, count = repeated
@@ -116,6 +188,19 @@ def detect(
             StallReason.REPETITION,
             f"you've run `{call}` {count} times in {_window(events, now)} with no change - "
             f"it isn't going to report back. Stop waiting and continue with the task.",
+        )
+
+    if has_pending_wait:
+        return StallVerdict(False, StallReason.NONE)
+
+    quiet = now - events[-1].ts if events else timedelta(0)
+    if events and quiet > IDLE_NO_WAIT_AFTER:
+        return StallVerdict(
+            True,
+            StallReason.IDLE_NO_WAIT,
+            f"you've been idle {minutes(quiet)} and nothing is pending - what are you waiting "
+            f"on? If it's real, register it with `kestrel-wait` and stop. Otherwise, check "
+            f"directly and continue.",
         )
 
     last = task.last_progress_at or task.created_at

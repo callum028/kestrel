@@ -28,6 +28,8 @@ process launched by Claude Code, not by this class.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -37,6 +39,7 @@ from kestrel_agent.worktrees import ensure_worktree
 
 from ..events import EventKind, EventLog
 from ..outcomes import Ok, Outcome, Refused
+from ..supervision import Diff
 from ..tasks import Task
 from ..terminal_activity import HumanActivityTracker
 from . import ExecutorKind
@@ -218,3 +221,109 @@ class ClaudeCodeExecutor:
             if terminal is None or not terminal.alive:
                 return
             await asyncio.sleep(STOP_POLL_INTERVAL)
+
+    # --- supervision hooks ------------------------------------------------------
+    # Everything below is duck-typed, not part of the `Executor` protocol - the
+    # other three executor kinds have no worktree and no PTY to ask about, so
+    # the orchestrator calls these only when `hasattr` says they exist.
+
+    async def alive(self, task: Task) -> bool | None:
+        """`None` means "no session known" (never started, or already torn
+        down) - not a stall, just nothing to judge. `False` is the one that
+        matters: a terminal the executor knows about whose process has ended
+        without `stop()` ever being called is a session that died mid-task,
+        and that is Stuck immediately, not a candidate for the nudge ladder.
+        """
+        cached = self._sessions.get(task.id)
+        if cached is None:
+            existing = await self.terminals.list(task_id=task.id)
+            if not existing:
+                return None
+            cached = existing[0].id
+        terminal = await self.terminals.get(cached)
+        if terminal is None:
+            return None
+        return terminal.alive
+
+    async def progress_hash(self, task: Task) -> str | None:
+        """A hash of the worktree's uncommitted state (tracked changes plus
+        untracked files), used as the progress proxy: unchanged for ~15
+        minutes while the session is active means nothing is actually
+        happening, whatever the transcript looks like. `None` when the task
+        has no worktree yet (e.g. the project cannot be resolved)."""
+        try:
+            worktree = self._worktree_for(task)
+        except NoProjectConfigured:
+            return None
+        if not worktree.exists():
+            return None
+        return await asyncio.to_thread(_worktree_diff_hash, worktree)
+
+    async def diff(self, task: Task) -> Diff:
+        """The task's diff, for claim validation (supervision.py) - a
+        completion or blocker claim is checked against this, never trusted."""
+        try:
+            worktree = self._worktree_for(task)
+        except NoProjectConfigured:
+            return Diff(added=[], removed=[], files=[])
+        if not worktree.exists():
+            return Diff(added=[], removed=[], files=[])
+        return await asyncio.to_thread(_worktree_diff, worktree)
+
+    async def symbol_exists(self, task: Task, symbol: str) -> bool:
+        """Whether `symbol` appears anywhere in the worktree's tracked
+        content right now - what a stated blocker is checked against before
+        it is accepted as real (`supervision.validate_blocker`)."""
+        try:
+            worktree = self._worktree_for(task)
+        except NoProjectConfigured:
+            return False
+        if not worktree.exists():
+            return False
+        return await asyncio.to_thread(_worktree_has_symbol, worktree, symbol)
+
+
+def _git(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
+
+
+def _worktree_diff_hash(worktree: Path) -> str:
+    diff = _git("diff", "HEAD", cwd=worktree).stdout
+    untracked = _git("status", "--porcelain", "--untracked-files=all", cwd=worktree).stdout
+    return hashlib.sha256((diff + untracked).encode()).hexdigest()
+
+
+def _worktree_diff(worktree: Path) -> Diff:
+    """Tracked changes (`git diff HEAD`) plus untracked files, in the shape
+    `supervision.py`'s claim checks already expect: added/removed lines and
+    the touched file list. Untracked files show up in `files` with no line
+    content - there is nothing to diff against for a file that never existed
+    before, but its path still matters for the spec-changes check."""
+    numstat = _git("diff", "HEAD", "--numstat", cwd=worktree).stdout
+    files = [line.split("\t")[-1] for line in numstat.splitlines() if line.strip()]
+
+    added: list[str] = []
+    removed: list[str] = []
+    patch = _git("diff", "HEAD", "--no-color", cwd=worktree).stdout
+    for line in patch.splitlines():
+        if line.startswith(("+++", "---")):
+            continue
+        if line.startswith("+"):
+            added.append(line[1:])
+        elif line.startswith("-"):
+            removed.append(line[1:])
+
+    status = _git("status", "--porcelain", "--untracked-files=all", cwd=worktree).stdout
+    for line in status.splitlines():
+        if line.startswith("??"):
+            files.append(line[3:].strip())
+
+    return Diff(added=added, removed=removed, files=files)
+
+
+def _worktree_has_symbol(worktree: Path, symbol: str) -> bool:
+    result = _git("grep", "-q", "-F", symbol, "--", ".", cwd=worktree)
+    # `git grep` exits 1 for "not found", which is a normal outcome here, not
+    # a failure - only treat genuine errors (missing repo, bad revision) as
+    # "cannot tell", which this collapses into "does not exist".
+    return result.returncode == 0

@@ -14,6 +14,9 @@ kestrel-session-host = "kestrel_agent.__main__:main"
 # Invoked by Claude Code's own hooks, once per event, from inside a task
 # worktree - see kestrel_agent/kestrel_hook.py.
 kestrel-hook = "kestrel_agent.kestrel_hook:main"
+# Invoked by Claude itself, from inside a task worktree, to register a wait
+# instead of polling for it - see kestrel_agent/kestrel_wait.py.
+kestrel-wait = "kestrel_agent.kestrel_wait:main"
 
 [build-system]
 requires = ["hatchling"]

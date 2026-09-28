@@ -96,6 +96,13 @@ class Config:
     claude_base_args: tuple[str, ...] = ("--dangerously-skip-permissions",)
     server_url: str = DEFAULT_SERVER_URL
 
+    # GitHub (github.py): PR discovery, CI status for waits, merge-on-green.
+    # Token from the environment only (never config), same as the Notion
+    # token - `GH_TOKEN` is what `gh auth token` and most CI runners already
+    # populate, so that is checked first if `GITHUB_TOKEN` is unset.
+    github_token: str | None = None
+    github_repo: str | None = None  # "owner/name"
+
     @property
     def token_path(self) -> Path:
         return self.data_dir / "token"
@@ -136,6 +143,8 @@ class Config:
             claude_worktrees_root=Path(worktrees_root).expanduser() if worktrees_root else None,
             claude_binary=os.environ.get("KESTREL_CLAUDE_BINARY", "claude"),
             server_url=os.environ.get("KESTREL_SERVER_URL", DEFAULT_SERVER_URL),
+            github_token=os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"),
+            github_repo=os.environ.get("KESTREL_GITHUB_REPO"),
         )
 
     def ensure_dirs(self) -> None:

@@ -27,6 +27,7 @@ from kestrel.events import EventKind
 from kestrel.executors.claude_code import ClaudeCodeConfig, ClaudeCodeExecutor
 from kestrel.outcomes import Ok, Refused
 from kestrel.runtime import Runtime
+from kestrel.tasks import TaskState
 
 FAKE_CLAUDE = """
 import json
@@ -235,3 +236,128 @@ async def test_stop_ends_the_session_and_leaves_the_worktree(live, tmp_path):
     assert stopped[0].payload["terminal_id"] == terminal_id
 
     assert (tmp_path / "worktrees" / "KES-4").exists()
+
+
+# --- supervision hooks: progress_hash, diff, symbol_exists, alive -----------
+# What the orchestrator (orchestrator.py) calls to wire the stall detector and
+# claim validation to the real worktree, rather than requiring the caller to
+# tell it what changed.
+
+
+async def test_progress_hash_is_stable_until_the_worktree_actually_changes(live, tmp_path):
+    rt, executor = live
+    task = rt.tasks.create("KES-10", "Fix the bug", ["tests pass"], "claude_code", scope="proj")
+    await executor.start(task, brief="brief")
+    worktree = tmp_path / "worktrees" / "KES-10"
+
+    baseline = await executor.progress_hash(task)
+    assert baseline is not None
+    assert await executor.progress_hash(task) == baseline
+
+    (worktree / "new_file.txt").write_text("hello\n")
+    assert await executor.progress_hash(task) != baseline
+
+
+async def test_progress_hash_is_none_when_the_project_cannot_be_resolved(live, tmp_path):
+    rt, executor = live
+    # A second configured project makes the task's project ambiguous without
+    # an explicit `scope` - `_project_for` raises `NoProjectConfigured` rather
+    # than guessing, and `progress_hash`/`diff`/`symbol_exists` all treat that
+    # the same way as "no worktree yet".
+    executor.config.projects["other"] = tmp_path / "unused"
+    task = rt.tasks.create("KES-11", "Fix the bug", ["tests pass"], "claude_code")  # no scope
+    assert await executor.progress_hash(task) is None
+
+
+async def test_diff_reports_tracked_and_untracked_changes(live, tmp_path):
+    rt, executor = live
+    task = rt.tasks.create("KES-12", "Fix the bug", ["tests pass"], "claude_code", scope="proj")
+    await executor.start(task, brief="brief")
+    worktree = tmp_path / "worktrees" / "KES-12"
+
+    (worktree / "README.md").write_text("goodbye\n")
+    (worktree / "new_file.txt").write_text("new content\n")
+
+    diff = await executor.diff(task)
+    assert "README.md" in diff.files
+    assert "new_file.txt" in diff.files
+    assert any("goodbye" in line for line in diff.added)
+    assert any("hello" in line for line in diff.removed)
+
+
+async def test_diff_is_empty_for_an_untouched_worktree(live):
+    rt, executor = live
+    task = rt.tasks.create("KES-13", "Fix the bug", ["tests pass"], "claude_code", scope="proj")
+    await executor.start(task, brief="brief")
+
+    diff = await executor.diff(task)
+    assert diff.added == diff.removed == diff.files == []
+
+
+async def test_symbol_exists_checks_the_worktrees_tracked_content(live):
+    rt, executor = live
+    task = rt.tasks.create("KES-14", "Fix the bug", ["tests pass"], "claude_code", scope="proj")
+    await executor.start(task, brief="brief")
+
+    assert await executor.symbol_exists(task, "hello") is True
+    assert await executor.symbol_exists(task, "LEGACY_SYNC_FLAG_NOBODY_WROTE") is False
+
+
+async def test_alive_is_none_for_a_task_the_executor_has_never_started(live):
+    rt, executor = live
+    task = rt.tasks.create("KES-15", "Fix the bug", ["tests pass"], "claude_code", scope="proj")
+    assert await executor.alive(task) is None
+
+
+async def test_alive_is_true_while_running_and_false_once_the_process_exits_on_its_own(live):
+    rt, executor = live
+    task = rt.tasks.create("KES-16", "Fix the bug", ["tests pass"], "claude_code", scope="proj")
+    await executor.start(task, brief="brief")
+    assert await executor.alive(task) is True
+
+    terminal = (await rt.terminals.list(task_id=task.id))[0]
+    await terminal.write(b"/exit\r")
+
+    # The process ends on its own here (unlike `executor.stop()`), which is
+    # exactly the "died mid-task" case the orchestrator's immediate-park
+    # branch exists for.
+    async with asyncio.timeout(5):
+        while await executor.alive(task) is not False:
+            await asyncio.sleep(0.05)
+
+
+# --- restart reconciliation (item 8) -----------------------------------------
+# On startup, a task believed RUNNING is checked against the session host
+# rather than assumed healthy - Runtime.reconcile_on_startup, called from
+# api.py's lifespan.
+
+
+async def test_reconciliation_leaves_a_healthy_running_task_alone(live):
+    rt, executor = live
+    task = rt.tasks.create("KES-20", "Fix the bug", ["tests pass"], "claude_code", scope="proj")
+    rt.tasks.transition(task.id, TaskState.BRIEFED)
+    rt.tasks.transition(task.id, TaskState.RUNNING)
+    await executor.start(task, brief="brief")
+    rt.executors["claude_code"] = executor
+
+    unaccountable = await rt.reconcile_on_startup()
+
+    assert unaccountable == []
+    assert rt.deliveries.pending() == []
+
+
+async def test_reconciliation_reports_a_running_task_with_no_live_session(live):
+    rt, executor = live
+    task = rt.tasks.create("KES-21", "Fix the bug", ["tests pass"], "claude_code", scope="proj")
+    rt.tasks.transition(task.id, TaskState.BRIEFED)
+    rt.tasks.transition(task.id, TaskState.RUNNING)
+    # Never actually started through this executor - nothing on the host
+    # accounts for it, e.g. the server restarted and forgot.
+    rt.executors["claude_code"] = executor
+
+    unaccountable = await rt.reconcile_on_startup()
+
+    assert unaccountable == ["KES-21"]
+    pending = rt.deliveries.pending()
+    assert len(pending) == 1
+    assert "KES-21" in pending[0].body
