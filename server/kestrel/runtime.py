@@ -7,6 +7,7 @@ conversation and all state; clients are views onto this object.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -19,12 +20,39 @@ from .delivery import DeliveryTracker
 from .devlock import DevLock
 from .events import EventKind, EventLog
 from .executors import Executor
+from .graph_mail import GraphMailConfig, GraphMailReader
+from .mail import FakeMailReader, MailReader, RecordingMailReader
 from .memory import MemoryStore
 from .observations import ObservationStore
 from .orchestrator import Orchestrator, TickReport
 from .tasks import TaskStore
 
+logger = logging.getLogger("kestrel")
+
 TICK_INTERVAL_SECONDS = 30
+
+
+def _build_mail_reader(config: Config, log: EventLog) -> MailReader:
+    """Real Graph access needs a completed one-time `mail_auth` sign-in as
+    well as the app registration's IDs - either missing means there is
+    nothing to authenticate with yet, so fall back to the fake rather than
+    failing Runtime.build over a capability that is opt-in by design."""
+    if config.mail_tenant_id and config.mail_client_id and config.mail_token_path.exists():
+        inner: MailReader = GraphMailReader(
+            GraphMailConfig(
+                tenant_id=config.mail_tenant_id,
+                client_id=config.mail_client_id,
+                token_path=config.mail_token_path,
+            )
+        )
+    else:
+        logger.warning(
+            "mail: no Graph credentials/token found - using the fake mail reader "
+            "(run `python -m kestrel.mail_auth` after setting KESTREL_MAIL_TENANT_ID "
+            "and KESTREL_MAIL_CLIENT_ID to read a real mailbox)"
+        )
+        inner = FakeMailReader()
+    return RecordingMailReader(inner, log)
 
 
 @dataclass
@@ -39,6 +67,7 @@ class Runtime:
     dev_lock: DevLock
     orchestrator: Orchestrator
     terminals: SessionHostClient
+    mail: MailReader
     executors: dict[str, Executor] = field(default_factory=dict)
 
     # Latest raw report from whichever client last spoke. Sensors, not beliefs -
@@ -65,6 +94,7 @@ class Runtime:
             dev_lock=dev_lock,
             orchestrator=Orchestrator(tasks, log, deliveries, dev_lock, executors),
             terminals=SessionHostClient(config.session_host_socket),
+            mail=_build_mail_reader(config, log),
             executors=executors,
         )
 
