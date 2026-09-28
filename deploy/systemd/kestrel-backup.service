@@ -1,0 +1,17 @@
+# One-shot: runs deploy/backup.sh. Triggered by kestrel-backup.timer;
+# `systemctl --user start kestrel-backup.service` runs it on demand.
+#
+# Install: ~/.config/systemd/user/kestrel-backup.service
+#   systemctl --user daemon-reload
+
+[Unit]
+Description=Kestrel nightly backup (SQLite + memory repo)
+After=kestrel-server.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/kestrel/current
+EnvironmentFile=%h/.config/kestrel/kestrel.env
+# BACKUP_REMOTE (where encrypted/private backup git repo lives) is read by
+# backup.sh from this same env file - see deploy/kestrel.env.example.
+ExecStart=%h/kestrel/current/deploy/backup.sh

@@ -1,0 +1,58 @@
+# Kestrel session host — owns every Claude Code PTY.
+#
+# Deliberately has NO relationship to kestrel-server.service: no BindsTo=,
+# PartOf=, or Requires= in either direction. The whole point of the split
+# (see agent/kestrel_agent/host.py's module docstring) is that redeploying or
+# restarting the server must never take a running Claude Code session with
+# it. Wants=/After=network... below is ordering only ("start me after the
+# network is up"), never a lifecycle coupling.
+#
+# Installed as a systemd --user unit (not a system unit in /etc): this
+# process only ever needs to run as the unprivileged Pi user, holds nothing
+# that requires root, and a user unit means deploy.sh and backup.sh can
+# manage services without sudo. Requires `loginctl enable-linger callum028`
+# (done by pi-setup.sh) so it starts at boot without an interactive login,
+# since a headless Pi never has one.
+#
+# Install: ~/.config/systemd/user/kestrel-session-host.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now kestrel-session-host.service
+
+[Unit]
+Description=Kestrel session host (Claude Code PTY owner)
+After=network-online.target
+Wants=network-online.target
+# Belongs in [Unit], not [Service] - the window StartLimitBurst counts
+# failures within.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+# %h expands to the unit's home directory (this user, since it's a --user
+# unit) - kept relative to that rather than hardcoding /home/callum028 so the
+# same unit file works if the account name ever changes.
+WorkingDirectory=%h/kestrel/current
+EnvironmentFile=%h/.config/kestrel/kestrel.env
+ExecStart=%h/kestrel/current/venv/bin/kestrel-session-host
+
+# Long-lived by design; restart on crash, but don't hot-loop if something is
+# fundamentally broken (e.g. the socket dir isn't writable).
+Restart=on-failure
+RestartSec=2
+
+# SIGTERM is handled in-process (agent/kestrel_agent/__main__.py installs a
+# handler that calls SessionHost.stop(), which closes the listening socket
+# and unlinks it cleanly) - default KillMode=control-group is fine since
+# there's nothing else in the cgroup to worry about hitting first.
+TimeoutStopSec=15
+
+# This process spawns Claude Code CLI + git + shells as its own children on
+# purpose (that's the entire job) - no ProtectSystem=strict / PrivateTmp
+# sandboxing here, since it needs normal filesystem access to the user's
+# repos, worktrees and $HOME (ssh keys, gh/claude CLI config). NoNewPrivileges
+# is safe to keep since nothing it runs needs setuid.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
