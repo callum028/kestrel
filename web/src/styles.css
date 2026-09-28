@@ -311,6 +311,15 @@ button {
   text-decoration: line-through;
 }
 
+.termtab:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.termtab:disabled:hover {
+  background: none;
+}
+
 .terminal-host {
   position: relative;
   min-height: 0;
@@ -406,16 +415,24 @@ button {
   line-height: 1.4;
 }
 
-/* --- offline state ------------------------------------------------------- */
-/* A failed poll must never look like an empty-but-fine app - this is loud on
-   purpose, and sits above everything else until the next poll succeeds. */
+/* --- offline / degraded state ---------------------------------------------
+   A failed poll (or a subsystem being down) must never look like an
+   empty-but-fine app - these are loud on purpose, and sit above everything
+   else until resolved. Stacked in one fixed container, not each fixed to
+   `top: 0` individually, so an offline banner and a session-host banner
+   showing at once don't render on top of each other. */
 
-.offline-banner {
+.banner-stack {
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
   z-index: 100;
+  display: flex;
+  flex-direction: column;
+}
+
+.offline-banner {
   text-align: center;
   padding: 6px;
   background: var(--bad);

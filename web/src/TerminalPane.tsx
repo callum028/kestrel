@@ -1,7 +1,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
-import { terminalSocket } from "./api";
+import { terminalCloseMessage, terminalSocket } from "./api";
 
 // One xterm instance per terminal id, kept alive across tab switches. Tearing
 // them down on every switch would lose the viewport and re-request scrollback
@@ -84,7 +84,7 @@ function ensure(id: string): Instance {
     }
     term.write(data);
   };
-  socket.onclose = () => term.write("\r\n\x1b[2m[detached]\x1b[0m\r\n");
+  socket.onclose = (event) => term.write(`\r\n\x1b[2m[${terminalCloseMessage(event)}]\x1b[0m\r\n`);
 
   term.onData((data) => {
     if (socket.readyState === WebSocket.OPEN) {

@@ -68,7 +68,13 @@ export function PhoneWorkspace({
   const openTaskSession = async (task: Task) => {
     const result = await api.openTerminal({ cwd: "~/workspace/github", task_handle: task.handle });
     if (result.status !== "ok") {
-      window.alert(result.status === "not_found" ? `Couldn't find ${result.searched_for}` : result.reason);
+      if (result.status === "not_found") {
+        window.alert(`Couldn't find ${result.searched_for}`);
+      } else if (result.status === "unavailable") {
+        window.alert(`Session host isn't running - ${result.reason}`);
+      } else {
+        window.alert(result.reason);
+      }
       return;
     }
     setView({ kind: "session", terminalId: result.id, handle: task.handle });

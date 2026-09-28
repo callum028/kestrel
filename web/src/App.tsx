@@ -6,7 +6,6 @@ import {
   setOnOriginRejected,
   setOnTokenRejected,
   setToken,
-  type TerminalInfo,
   validateToken,
 } from "./api";
 import { AccountMenu } from "./AccountMenu";
@@ -207,6 +206,21 @@ function OfflineBanner({ reachable }: { reachable: boolean }) {
   return <div className="offline-banner">Can't reach Kestrel. Retrying…</div>;
 }
 
+function SessionHostBanner({ reason }: { reason: string | null }) {
+  // Kestrel itself (the server) is fine here - it answered clearly, with
+  // "unavailable" - it is the separate session-host process (terminals,
+  // phone "session" screens) that isn't running. Distinct from OfflineBanner
+  // for the same reason OriginErrorBanner is: a dead session host must not
+  // look like a dead server, because the fix and the blast radius are both
+  // different - chat and tasks keep working the whole time this is up.
+  if (!reason) return null;
+  return (
+    <div className="offline-banner" style={{ background: "var(--warn)" }}>
+      Session host isn't running - {reason}
+    </div>
+  );
+}
+
 function OriginErrorBanner({
   message,
   onDismiss,
@@ -250,8 +264,11 @@ function Shell({
 
   return (
     <>
-      <OriginErrorBanner message={originError} onDismiss={onDismissOriginError} />
-      <OfflineBanner reachable={data.reachable} />
+      <div className="banner-stack">
+        <OriginErrorBanner message={originError} onDismiss={onDismissOriginError} />
+        <OfflineBanner reachable={data.reachable} />
+        <SessionHostBanner reason={data.sessionHostReason} />
+      </div>
       {isPhone ? (
         <PhoneWorkspace
           state={data.state}
@@ -271,6 +288,9 @@ function Shell({
           deliveries={data.deliveries}
           messages={data.messages}
           thinking={data.thinking}
+          terminals={data.terminals}
+          sessionHostReason={data.sessionHostReason}
+          refreshTerminals={data.refreshTerminals}
           sendMessage={data.sendMessage}
           refresh={data.refresh}
           focusDeliveryId={focusDeliveryId}
@@ -287,6 +307,9 @@ interface WorkspaceProps {
   deliveries: ReturnType<typeof useKestrelData>["deliveries"];
   messages: ReturnType<typeof useKestrelData>["messages"];
   thinking: ReturnType<typeof useKestrelData>["thinking"];
+  terminals: ReturnType<typeof useKestrelData>["terminals"];
+  sessionHostReason: ReturnType<typeof useKestrelData>["sessionHostReason"];
+  refreshTerminals: ReturnType<typeof useKestrelData>["refreshTerminals"];
   sendMessage: ReturnType<typeof useKestrelData>["sendMessage"];
   refresh: ReturnType<typeof useKestrelData>["refresh"];
   focusDeliveryId: string | null;
@@ -299,26 +322,18 @@ function DeskWorkspace({
   deliveries,
   messages,
   thinking,
+  terminals,
+  sessionHostReason,
+  refreshTerminals,
   sendMessage,
   refresh,
   focusDeliveryId,
   onUnpair,
 }: WorkspaceProps) {
   const [tab, setTab] = useState<string>("work");
-  const [terminals, setTerminals] = useState<TerminalInfo[]>([]);
   const [activeTerminal, setActiveTerminal] = useState<string | null>(null);
   const [activeTask, setActiveTask] = useState<string | null>(null);
   const lastInput = useRef<number>(Date.now());
-
-  const refreshTerminals = useCallback(async () => {
-    setTerminals(await api.terminals());
-  }, []);
-
-  useEffect(() => {
-    refreshTerminals().catch(() => undefined);
-    const id = setInterval(() => refreshTerminals().catch(() => undefined), 3000);
-    return () => clearInterval(id);
-  }, [refreshTerminals]);
 
   useEffect(() => {
     const mark = () => (lastInput.current = Date.now());
@@ -353,11 +368,16 @@ function DeskWorkspace({
     const result = await api.openTerminal({ cwd: DEFAULT_CWD, task_handle: taskHandle });
     if (result.status !== "ok") {
       // Every instruction ends in a state; surfacing it beats a dead button.
-      window.alert(
-        result.status === "not_found"
-          ? `Couldn't find ${result.searched_for}${result.looked_in ? ` in ${result.looked_in}` : ""}`
-          : result.reason,
-      );
+      // "unavailable" also refreshes the shared banner immediately, rather
+      // than waiting out the next poll interval.
+      if (result.status === "not_found") {
+        window.alert(`Couldn't find ${result.searched_for}${result.looked_in ? ` in ${result.looked_in}` : ""}`);
+      } else if (result.status === "unavailable") {
+        window.alert(`Session host isn't running - ${result.reason}`);
+        await refreshTerminals();
+      } else {
+        window.alert(result.reason);
+      }
       return;
     }
     setActiveTerminal(result.id);
@@ -442,7 +462,12 @@ function DeskWorkspace({
                 </button>
               </span>
             ))}
-            <button className="termtab" onClick={() => openTerminal()} title="New terminal">
+            <button
+              className="termtab"
+              onClick={() => openTerminal()}
+              disabled={!!sessionHostReason}
+              title={sessionHostReason ? "Session host isn't running" : "New terminal"}
+            >
               +
             </button>
           </div>
@@ -450,6 +475,8 @@ function DeskWorkspace({
           <div className="terminal-host">
             {activeTerminal ? (
               <TerminalPane id={activeTerminal} />
+            ) : sessionHostReason ? (
+              <p className="placeholder">Session host isn't running - {sessionHostReason}</p>
             ) : (
               <p className="placeholder">
                 No terminal open. Press + for a shell, or double-click a task to open one

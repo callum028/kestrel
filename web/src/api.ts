@@ -4,7 +4,15 @@
 export type Outcome<T = unknown> =
   | ({ status: "ok" } & T)
   | { status: "not_found"; searched_for: string; looked_in?: string }
-  | { status: "refused"; reason: string };
+  | { status: "refused"; reason: string }
+  // The session host (a separate long-lived process the terminals subsystem
+  // is a client of - see agent/kestrel_agent/host_client.py) isn't reachable.
+  // Distinct from every other outcome above: those are about *this* request
+  // ("no such task", "refused"), this one means the whole terminals
+  // subsystem is down, and every /terminals endpoint (and the websocket) can
+  // return it - a caller that only handles "ok" vs "not_found" will crash on
+  // it, which is exactly what happened before this type existed.
+  | { status: "unavailable"; reason: string };
 
 export interface Task {
   handle: string;
@@ -48,6 +56,19 @@ export interface TerminalInfo {
   task_id: string | null;
   alive: boolean;
   command: string[];
+}
+
+// GET /terminals: a bare array normally, or the same "unavailable" shape
+// every other terminals endpoint can return - never an empty array standing
+// in for "can't tell", which would look identical to "there are none".
+export type TerminalsList = TerminalInfo[] | { status: "unavailable"; reason: string };
+
+export function isUnavailable(value: unknown): value is { status: "unavailable"; reason: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { status?: unknown }).status === "unavailable"
+  );
 }
 
 export interface Delivery {
@@ -271,7 +292,7 @@ export const api = {
   taskDetail: (handle: string) => json<Outcome<TaskDetail>>(`/tasks/${handle}`),
   deliveries: () => json<Delivery[]>("/deliveries"),
 
-  terminals: () => json<TerminalInfo[]>("/terminals"),
+  terminals: () => json<TerminalsList>("/terminals"),
 
   openTerminal: (body: { cwd: string; task_handle?: string; command?: string[] }) =>
     json<Outcome<{ id: string; cwd: string; task_id: string | null }>>("/terminals", {
@@ -325,6 +346,28 @@ export const api = {
       body: JSON.stringify({ endpoint }),
     }),
 };
+
+// The websocket handshake has no room for a JSON body, so a terminal socket
+// that can't be served closes with one of these application-defined codes
+// instead (kestrel/api.py's `terminal_ws`) - a plain 1000/1006 would look the
+// same as "you closed the laptop lid", which is not what "the session host
+// just isn't running" or "this terminal is gone" mean. Real browsers only
+// guarantee `event.reason` for a close sent *after* a completed handshake -
+// closing pre-accept (4401/4404/4503 all do, so the client can never read a
+// stale terminal's output) can arrive as a bare 1006 with no reason instead,
+// so this always has a message for that too.
+export function terminalCloseMessage(event: { code: number; reason: string }): string {
+  switch (event.code) {
+    case 4503:
+      return `session host isn't running${event.reason ? ` - ${event.reason}` : ""}`;
+    case 4404:
+      return "this terminal no longer exists";
+    case 4401:
+      return "not authorized - re-pair this device";
+    default:
+      return event.reason || "detached";
+  }
+}
 
 export function terminalSocket(id: string): WebSocket {
   // The browser WebSocket API cannot set headers, so the token rides in the
