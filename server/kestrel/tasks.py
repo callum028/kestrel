@@ -152,6 +152,24 @@ class TaskStore:
         row = self._conn.execute("SELECT * FROM tasks WHERE handle = ?", (handle,)).fetchone()
         return _to_task(row) if row else None
 
+    def by_ticket_ref(self, ticket_ref: str) -> Task | None:
+        row = self._conn.execute(
+            "SELECT * FROM tasks WHERE ticket_ref = ?", (ticket_ref,)
+        ).fetchone()
+        return _to_task(row) if row else None
+
+    def set_ticket_ref(self, task_id: str, ticket_ref: str, actor: str = "kestrel") -> Task:
+        """Anything asked of Kestrel that isn't already a ticket gets one created
+        first - this records the link once that ticket exists."""
+        self._log.append(
+            EventKind.TASK_TICKET_LINKED, actor, {"ticket_ref": ticket_ref}, task_id=task_id
+        )
+        self._conn.execute(
+            "UPDATE tasks SET ticket_ref = ?, updated_at = ? WHERE id = ?",
+            (ticket_ref, _now(), task_id),
+        )
+        return self.get(task_id)
+
     def active(self) -> list[Task]:
         terminal = (str(TaskState.DONE), str(TaskState.FAILED))
         rows = self._conn.execute(

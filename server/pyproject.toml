@@ -11,6 +11,8 @@ dependencies = [
     # auth and Graph calls. No HTML-parsing library added alongside it -
     # kestrel.graph_mail.html_to_text uses the stdlib html.parser, which is
     # enough for reading a body rather than rendering one.
+    # The Notion board client is httpx directly against the REST API - no SDK,
+    # matching the "one interface, ~50 lines" bias elsewhere in this codebase.
     "httpx>=0.27",
     # Co-located for v0: both halves run in WSL, so the server imports the
     # executor directly. Installed from ../agent with `pip install -e`.

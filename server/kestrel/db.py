@@ -94,6 +94,28 @@ CREATE TABLE IF NOT EXISTS sessions (
     task_id    TEXT NOT NULL,
     started_at TEXT NOT NULL
 );
+
+-- Notion is the source of truth for tasks; this is the sidecar that makes the
+-- sync loop-safe. last_pushed_lane is what Kestrel itself last wrote - the
+-- poller compares against it, not against the task's own state, so its own
+-- write never gets read back on the next poll as a manual instruction.
+CREATE TABLE IF NOT EXISTS board_sync (
+    ticket_id       TEXT PRIMARY KEY,
+    task_id         TEXT NOT NULL,
+    last_pushed_lane TEXT,
+    last_pushed_flag INTEGER NOT NULL DEFAULT 0,
+    updated_at      TEXT NOT NULL
+);
+
+-- Single-row cursor for both halves of the sync loop, mirroring dev_lock's
+-- shape: last_poll_at drives "changed since" for manual-move detection,
+-- last_pushed_seq drives how far the event log has been mirrored to Notion.
+CREATE TABLE IF NOT EXISTS board_cursor (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    last_poll_at    TEXT,
+    last_pushed_seq INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO board_cursor (id, last_poll_at, last_pushed_seq) VALUES (1, NULL, 0);
 """
 
 
