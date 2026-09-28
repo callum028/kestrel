@@ -169,6 +169,51 @@ def test_acknowledging_an_unknown_delivery_says_so(client):
     assert body["status"] == "not_found"
 
 
+# --- conversation -------------------------------------------------------
+
+
+def test_posting_a_message_stores_it_and_returns_it(client):
+    body = client.post("/conversation/messages", json={"text": "what's running?"}).json()
+    assert body["status"] == "ok"
+    assert body["role"] == "user"
+    assert body["text"] == "what's running?"
+
+
+def test_listing_messages_includes_the_stub_reply(client):
+    client.post("/conversation/messages", json={"text": "what's running?"})
+    messages = client.get("/conversation/messages").json()
+    assert [m["role"] for m in messages] == ["user", "kestrel"]
+    assert "brain isn't connected" in messages[1]["text"]
+
+
+def test_listing_messages_after_a_cursor_only_returns_the_newer_ones(client):
+    client.post("/conversation/messages", json={"text": "first"})
+    cursor = client.get("/conversation/messages").json()[-1]["id"]
+    client.post("/conversation/messages", json={"text": "second"})
+    fresh = client.get(f"/conversation/messages?after={cursor}").json()
+    assert fresh[0]["text"] == "second"
+    assert [m["role"] for m in fresh] == ["user", "kestrel"]
+
+
+# --- web push -------------------------------------------------------------
+
+
+def test_the_vapid_public_key_is_reachable(client):
+    body = client.get("/push/vapid-public-key").json()
+    assert isinstance(body["public_key"], str) and body["public_key"]
+
+
+def test_subscribing_and_unsubscribing(client):
+    sub = {"endpoint": "https://push.example/abc", "keys": {"p256dh": "p", "auth": "a"}}
+    assert client.post("/push/subscriptions", json=sub).json()["status"] == "ok"
+
+    removed = client.request("DELETE", "/push/subscriptions", json={"endpoint": sub["endpoint"]})
+    assert removed.json()["status"] == "ok"
+
+    missing = client.request("DELETE", "/push/subscriptions", json={"endpoint": sub["endpoint"]})
+    assert missing.json()["status"] == "not_found"
+
+
 # --- authentication ---------------------------------------------------------
 # POST /terminals spawns a process with Callum's keys and repos, so "who can
 # reach the API" is the whole security model.

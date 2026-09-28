@@ -1,15 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  api,
-  hasToken,
-  type Delivery,
-  type State,
-  type Task,
-  type TerminalInfo,
-} from "./api";
+import { api, hasToken, type TerminalInfo } from "./api";
+import { ConversationPane } from "./ConversationPane";
+import { PhoneWorkspace } from "./PhoneWorkspace";
+import { PushToggle } from "./PushToggle";
 import { TerminalPane, disposeTerminal } from "./TerminalPane";
+import { PHONE_QUERY, useMediaQuery } from "./useMediaQuery";
+import { useKestrelData } from "./useKestrelData";
 
-const POLL_MS = 3000;
 const DEFAULT_CWD = "~/workspace/github";
 
 // Tabs are capabilities. Conversation is deliberately not one of them - it sits
@@ -21,11 +18,22 @@ const TABS = [
   { id: "calendar", label: "Calendar", ready: false },
 ] as const;
 
+/** A notification click deep-links to `/?delivery=<id>` (public/sw.js). Read
+ * once on load and strip it back out of the URL so a refresh does not re-focus
+ * the same thing forever. */
+function useDeepLinkedDelivery(): string | null {
+  const [id] = useState<string | null>(() => new URLSearchParams(location.search).get("delivery"));
+  useEffect(() => {
+    if (id) window.history.replaceState(null, "", location.pathname);
+  }, [id]);
+  return id;
+}
+
 export default function App() {
   // The token check has to happen *outside* the component holding the hooks.
   // An early return inside it does not stop effects - React still runs them -
   // so a tokenless window sat there issuing a 401 every three seconds.
-  return hasToken ? <Workspace /> : <NoToken />;
+  return hasToken ? <Shell /> : <NoToken />;
 }
 
 function NoToken() {
@@ -52,34 +60,73 @@ function NoToken() {
   );
 }
 
-function Workspace() {
+function OfflineBanner({ reachable }: { reachable: boolean }) {
+  // A failed poll must never look like an empty-but-fine state: silently
+  // showing stale tasks/deliveries is indistinguishable from "nothing is
+  // happening", which is the one lie an always-on assistant cannot tell.
+  if (reachable) return null;
+  return <div className="offline-banner">Can't reach Kestrel. Retrying…</div>;
+}
+
+function Shell() {
+  const isPhone = useMediaQuery(PHONE_QUERY);
+  const data = useKestrelData();
+  const focusDeliveryId = useDeepLinkedDelivery();
+
+  return (
+    <>
+      <OfflineBanner reachable={data.reachable} />
+      {isPhone ? (
+        <PhoneWorkspace
+          state={data.state}
+          tasks={data.tasks}
+          deliveries={data.deliveries}
+          messages={data.messages}
+          sendMessage={data.sendMessage}
+          refresh={data.refresh}
+          focusDeliveryId={focusDeliveryId}
+        />
+      ) : (
+        <DeskWorkspace
+          state={data.state}
+          tasks={data.tasks}
+          deliveries={data.deliveries}
+          messages={data.messages}
+          sendMessage={data.sendMessage}
+          refresh={data.refresh}
+          focusDeliveryId={focusDeliveryId}
+        />
+      )}
+    </>
+  );
+}
+
+interface WorkspaceProps {
+  state: ReturnType<typeof useKestrelData>["state"];
+  tasks: ReturnType<typeof useKestrelData>["tasks"];
+  deliveries: ReturnType<typeof useKestrelData>["deliveries"];
+  messages: ReturnType<typeof useKestrelData>["messages"];
+  sendMessage: ReturnType<typeof useKestrelData>["sendMessage"];
+  refresh: ReturnType<typeof useKestrelData>["refresh"];
+  focusDeliveryId: string | null;
+}
+
+function DeskWorkspace({ state, tasks, deliveries, messages, sendMessage, refresh, focusDeliveryId }: WorkspaceProps) {
   const [tab, setTab] = useState<string>("work");
-  const [state, setState] = useState<State | null>(null);
-  const [tasks, setTasks] = useState<Task[]>([]);
   const [terminals, setTerminals] = useState<TerminalInfo[]>([]);
-  const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [activeTerminal, setActiveTerminal] = useState<string | null>(null);
   const [activeTask, setActiveTask] = useState<string | null>(null);
   const lastInput = useRef<number>(Date.now());
 
-  const refresh = useCallback(async () => {
-    const [s, t, term, d] = await Promise.all([
-      api.state(),
-      api.tasks(),
-      api.terminals(),
-      api.deliveries(),
-    ]);
-    setState(s);
-    setTasks(t);
-    setTerminals(term);
-    setDeliveries(d);
+  const refreshTerminals = useCallback(async () => {
+    setTerminals(await api.terminals());
   }, []);
 
   useEffect(() => {
-    refresh().catch(() => undefined);
-    const id = setInterval(() => refresh().catch(() => undefined), POLL_MS);
+    refreshTerminals().catch(() => undefined);
+    const id = setInterval(() => refreshTerminals().catch(() => undefined), 3000);
     return () => clearInterval(id);
-  }, [refresh]);
+  }, [refreshTerminals]);
 
   useEffect(() => {
     const mark = () => (lastInput.current = Date.now());
@@ -122,14 +169,14 @@ function Workspace() {
       return;
     }
     setActiveTerminal(result.id);
-    await refresh();
+    await refreshTerminals();
   };
 
   const closeTerminal = async (id: string) => {
     await api.closeTerminal(id);
     disposeTerminal(id);
     setActiveTerminal((current) => (current === id ? null : current));
-    await refresh();
+    await refreshTerminals();
   };
 
   return (
@@ -150,6 +197,7 @@ function Workspace() {
           </button>
         ))}
         <span className="spacer" />
+        <PushToggle />
         <span className="presence">
           <span className={`dot ${state?.presence ?? "away"}`} />
           {state?.presence?.replace("_", " ") ?? "…"}
@@ -227,7 +275,7 @@ function Workspace() {
               <p className="empty">Nothing to raise.</p>
             ) : (
               deliveries.map((d) => (
-                <div key={d.id} className={`said ${d.urgency}`}>
+                <div key={d.id} className={`said ${d.urgency}${d.id === focusDeliveryId ? " highlight" : ""}`}>
                   <div className="subject">
                     <span>{d.subject}</span>
                     <span>·</span>
@@ -247,13 +295,7 @@ function Workspace() {
               ))
             )}
           </div>
-          <div className="composer">
-            <input disabled placeholder="Talk to Kestrel…" />
-            <p className="note">
-              No model provider configured yet, so it can report but not converse. Everything
-              above is real.
-            </p>
-          </div>
+          <ConversationPane messages={messages} onSend={sendMessage} compact />
         </aside>
       </div>
     </div>

@@ -17,6 +17,8 @@ const proxied = [
   "/tick",
   "/sessions",
   "/hooks",
+  "/conversation",
+  "/push",
 ];
 
 export default defineConfig({

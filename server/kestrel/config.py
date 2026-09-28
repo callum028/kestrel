@@ -101,6 +101,12 @@ class Config:
         return self.data_dir / "token"
 
     @property
+    def vapid_key_path(self) -> Path:
+        # Mirrors token_path: one secret per install, 0600, loaded-or-created
+        # by the module that owns it (kestrel.push) rather than here.
+        return self.data_dir / "vapid_private_key.pem"
+
+    @property
     def mail_token_path(self) -> Path:
         return self.data_dir / "mail_token"
 

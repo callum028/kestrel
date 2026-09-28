@@ -68,6 +68,13 @@ class EventKind(StrEnum):
     # Delivery
     MESSAGE_DELIVERED = "channel.delivered"
     MESSAGE_ACKNOWLEDGED = "channel.acknowledged"
+    PUSH_SENT = "channel.push_sent"
+    PUSH_FAILED = "channel.push_failed"
+    PUSH_SUBSCRIBED = "channel.push_subscribed"
+    PUSH_UNSUBSCRIBED = "channel.push_unsubscribed"
+
+    # Conversation - the one Kestrel chat, shared across every device.
+    CONVERSATION_MESSAGE = "conversation.message"
 
     # Mail - read-only, only on request. Every read is recorded here (what was
     # read, never the body), which is the audit trail for a capability whose
